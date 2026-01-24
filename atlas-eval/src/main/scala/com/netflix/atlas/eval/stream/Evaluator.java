@@ -321,22 +321,87 @@ public final class Evaluator extends EvaluatorImpl {
     Evaluator evaluator = new Evaluator(config, new NoopRegistry(), system);
 
     // Process URIs
+    logger.info("Starting StreamConverters pipeline - reading URIs from stdin");
+    logger.info("Memory before processing - Total: {} MB, Free: {} MB, Max: {} MB",
+        Runtime.getRuntime().totalMemory() / 1024 / 1024,
+        Runtime.getRuntime().freeMemory() / 1024 / 1024,
+        Runtime.getRuntime().maxMemory() / 1024 / 1024);
+
     StreamConverters                                       // Read in URIs from stdin
         .fromInputStream(() -> System.in)
         .via(Framing.delimiter(ByteString.fromString("\n"), 16384))
-        .map(b -> b.decodeString(StandardCharsets.UTF_8))
+        .map(b -> {
+          String uri = b.decodeString(StandardCharsets.UTF_8);
+          logger.debug("Decoded URI from input stream: {} (length: {} bytes)",
+              uri.substring(0, Math.min(100, uri.length())), uri.length());
+          return uri;
+        })
         .zipWithIndex()                                    // Use line number as id for output
-        .map(p -> new DataSource(p.second().toString(), p.first()))
-        .fold(new HashSet<DataSource>(), (vs, v) -> { vs.add(v); return vs; })
-        .map(DataSources::new)
-        .flatMapConcat(Source::repeat)                     // Repeat so stream doesn't shutdown
+        .map(p -> {
+          DataSource ds = new DataSource(p.second().toString(), p.first());
+          if (p.second() < 10 || p.second() % 100 == 0) {
+            logger.info("Created DataSource #{} - id: {}, step: {}, uri: {}",
+                p.second(), ds.id(), ds.step(),
+                ds.uri().substring(0, Math.min(150, ds.uri().length())));
+          }
+          return ds;
+        })
+        .fold(new HashSet<DataSource>(), (vs, v) -> {
+          boolean added = vs.add(v);
+          int size = vs.size();
+
+          // Log more frequently and with more details
+          if (size % 100 == 0 || size == 1 || size == 10 || size == 50) {
+            long usedMemory = (Runtime.getRuntime().totalMemory() - Runtime.getRuntime().freeMemory()) / 1024 / 1024;
+            logger.info("HashSet fold accumulator - Size: {}, Added: {}, DataSource id: {}, Memory used: {} MB",
+                size, added, v.id(), usedMemory);
+
+            // Warn if memory is getting high
+            long maxMemory = Runtime.getRuntime().maxMemory() / 1024 / 1024;
+            if (usedMemory > maxMemory * 0.7) {
+              logger.warn("HIGH MEMORY WARNING in fold - Using {} MB of {} MB max ({}%)",
+                  usedMemory, maxMemory, (usedMemory * 100 / maxMemory));
+            }
+          }
+
+          if (!added) {
+            logger.warn("Duplicate DataSource detected in fold - id: {}, uri: {}",
+                v.id(), v.uri().substring(0, Math.min(100, v.uri().length())));
+          }
+
+          return vs;
+        })
+        .map(hashSet -> {
+          logger.info("Fold operation completed - Final HashSet size: {}", hashSet.size());
+          logger.info("Memory after fold - Total: {} MB, Free: {} MB, Used: {} MB",
+              Runtime.getRuntime().totalMemory() / 1024 / 1024,
+              Runtime.getRuntime().freeMemory() / 1024 / 1024,
+              (Runtime.getRuntime().totalMemory() - Runtime.getRuntime().freeMemory()) / 1024 / 1024);
+
+          if (hashSet.isEmpty()) {
+            logger.warn("WARNING: HashSet is empty after fold operation!");
+          }
+
+          DataSources dataSources = new DataSources(hashSet);
+          logger.info("Created DataSources from HashSet with {} sources", dataSources.sources().size());
+          return dataSources;
+        })
+        .flatMapConcat(ds -> {
+          logger.info("Starting flatMapConcat with Source.repeat");
+          return Source.repeat(ds);
+        })
         .throttle(                                         // Throttle to avoid wasting CPU
             1, Duration.ofMinutes(1),
             1, ThrottleMode.shaping()
         )
         .via(Flow.fromProcessor(evaluator::createStreamsProcessor))
         .runForeach(
-            msg -> System.out.printf("%10s: %s%n", msg.id(), msg.message().toJson()),
+            msg -> {
+              if (logger.isDebugEnabled()) {
+                logger.debug("Output message - id: {}, message: {}", msg.id(), msg.message().toJson());
+              }
+              System.out.printf("%10s: %s%n", msg.id(), msg.message().toJson());
+            },
             mat
         )
         .toCompletableFuture()

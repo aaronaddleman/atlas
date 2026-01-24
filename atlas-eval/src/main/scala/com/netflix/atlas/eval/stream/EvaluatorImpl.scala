@@ -550,8 +550,17 @@ private[stream] abstract class EvaluatorImpl(
         case BinaryMessage.Strict(str) =>
           Source.single(str)
         case msg: BinaryMessage =>
-          msg.dataStream.fold(ByteString.empty)(_ ++ _)
-      }
+          msg.dataStream
+            .fold(ByteString.empty) { (acc, chunk) =>
+              val newAcc = acc ++ chunk
+              // Log the size of the incoming chunk and the total so far
+              logger.info(s"Received chunk of size: ${chunk.size} bytes, accumulated size: ${newAcc.size} bytes")
+              // Optionally, log a warning if very large
+              if (newAcc.size % (100 * 1024 * 1024) < chunk.size) { // Every 100MB
+                logger.warn(s"Accumulated ByteString in fold exceeds ${newAcc.size / (1024 * 1024)} MB")
+              }
+              newAcc
+            }
       .mapMaterializedValue(_ => NotUsed)
   }
 
