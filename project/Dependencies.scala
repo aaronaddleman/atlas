@@ -4,18 +4,18 @@ import sbt.*
 
 object Dependencies {
   object Versions {
-    val pekko       = "1.2.1"
+    val pekko       = "1.4.0"
     val pekkoHttpV  = "1.3.0"
-    val iep         = "5.1.10"
-    val jackson     = "2.20.1"
-    val log4j       = "2.25.2"
-    val otel        = "1.56.0"
+    val iep         = "6.0.0"
+    val jackson     = "3.0.4"
+    val log4j       = "2.25.3"
+    val otel        = "1.59.0"
     val scala       = "2.13.18"
     val slf4j       = "2.0.17"
-    val spectator   = "1.9.2"
-    val spring      = "6.2.13"
+    val spectator   = "1.9.4"
+    val spring      = "7.0.4"
 
-    val crossScala  = Seq(scala, "3.7.4")
+    val crossScala  = Seq(scala, "3.8.1")
   }
 
   import Versions.*
@@ -28,8 +28,8 @@ object Dependencies {
   val pekkoStream       = "org.apache.pekko" %% "pekko-stream" % pekko
   val pekkoStreamTestkit= "org.apache.pekko" %% "pekko-stream-testkit" % pekko
   val pekkoTestkit      = "org.apache.pekko" %% "pekko-testkit" % pekko
-  val caffeine          = "com.github.ben-manes.caffeine" % "caffeine" % "3.2.2"
-  val equalsVerifier    = "nl.jqno.equalsverifier" % "equalsverifier" % "4.2.3"
+  val caffeine          = "com.github.ben-manes.caffeine" % "caffeine" % "3.2.3"
+  val equalsVerifier    = "nl.jqno.equalsverifier" % "equalsverifier" % "4.3.1"
   val hikariCP          = "com.zaxxer" % "HikariCP" % "7.0.2"
   val iepLeaderApi      = "com.netflix.iep" % "iep-leader-api" % iep
   val iepLeaderDynamoDb = "com.netflix.iep" % "iep-leader-dynamodb" % iep
@@ -37,13 +37,11 @@ object Dependencies {
   val iepService        = "com.netflix.iep" % "iep-service" % iep
   val iepSpring         = "com.netflix.iep" % "iep-spring" % iep
   val iepSpringAtlas    = "com.netflix.iep" % "iep-spring-atlas" % iep
-  val jacksonAnno       = "com.fasterxml.jackson.core" % "jackson-annotations" % jackson
-  val jacksonCore       = "com.fasterxml.jackson.core" % "jackson-core" % jackson
-  val jacksonJava8      = "com.fasterxml.jackson.datatype" % "jackson-datatype-jdk8" % jackson
-  val jacksonJsr310     = "com.fasterxml.jackson.datatype" % "jackson-datatype-jsr310" % jackson
-  val jacksonMapper     = "com.fasterxml.jackson.core" % "jackson-databind" % jackson
-  val jacksonScala      = "com.fasterxml.jackson.module" %% "jackson-module-scala" % jackson
-  val jacksonSmile      = "com.fasterxml.jackson.dataformat" % "jackson-dataformat-smile" % jackson
+  val jacksonCore       = "tools.jackson.core" % "jackson-core" % jackson
+  val jacksonMapper     = "tools.jackson.core" % "jackson-databind" % jackson
+  val jacksonScala      = "tools.jackson.module" %% "jackson-module-scala" % jackson
+  val jacksonSmile      = "tools.jackson.dataformat" % "jackson-dataformat-smile" % jackson
+  val javaWebSocket     = "org.java-websocket" % "Java-WebSocket" % "1.6.0"
   val jol               = "org.openjdk.jol" % "jol-core" % "0.17"
   val jsr305            = "com.google.code.findbugs" % "jsr305" % "3.0.2"
   val log4jApi          = "org.apache.logging.log4j" % "log4j-api" % log4j
@@ -51,12 +49,13 @@ object Dependencies {
   val log4jJcl          = "org.apache.logging.log4j" % "log4j-jcl" % log4j
   val log4jJul          = "org.apache.logging.log4j" % "log4j-jul" % log4j
   val log4jSlf4j        = "org.apache.logging.log4j" % "log4j-slf4j2-impl" % log4j
-  val munit             = "org.scalameta" %% "munit" % "1.2.1"
+  val lsp4j             = "org.eclipse.lsp4j" % "org.eclipse.lsp4j" % "1.0.0"
+  val munit             = "org.scalameta" %% "munit" % "1.2.2"
   val otelSdk           = "io.opentelemetry" % "opentelemetry-sdk" % otel
   val otelSdkTest       = "io.opentelemetry" % "opentelemetry-sdk-testing" % otel
-  val postgres          = "org.postgresql" % "postgresql" % "42.7.8"
-  val postgresEmbedded  = "io.zonky.test" % "embedded-postgres" % "2.1.1"
-  val roaringBitmap     = "org.roaringbitmap" % "RoaringBitmap" % "1.3.0"
+  val postgres          = "org.postgresql" % "postgresql" % "42.7.9"
+  val postgresEmbedded  = "io.zonky.test" % "embedded-postgres" % "2.2.0"
+  val roaringBitmap     = "org.roaringbitmap" % "RoaringBitmap" % "1.6.12"
   val scalaCompat       = "org.scala-lang.modules" %% "scala-collection-compat" % "2.14.0"
   val scalaCompatJdk8   = "org.scala-lang.modules" %% "scala-java8-compat" % "1.0.2"
   val scalaCompiler     = "org.scala-lang" % "scala-compiler"

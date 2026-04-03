@@ -20,6 +20,9 @@ import com.netflix.atlas.chart.model.Scale
 import java.time.ZoneOffset
 import munit.FunSuite
 
+import java.time.Instant
+import java.time.ZonedDateTime
+import java.time.temporal.ChronoUnit
 import scala.util.Random
 
 class TicksSuite extends FunSuite {
@@ -428,15 +431,15 @@ class TicksSuite extends FunSuite {
   test("duration [0, 3659]") {
     val ticks = Ticks.duration(0.0, 3659, 5)
     sanityCheck(ticks)
-    assertEquals(ticks.size, 21)
-    assertEquals(ticks.count(_.major), 6)
+    assertEquals(ticks.size, 17)
+    assertEquals(ticks.count(_.major), 5)
     assertEquals(ticks.head.offset, 0.0)
     assertEquals(ticks.head.label, "0m")
     assertEquals(ticks.last.label, "60m")
   }
 
   test("duration [0, 3600]") {
-    val ticks = Ticks.duration(0.0, 3659, 5)
+    val ticks = Ticks.duration(0.0, 3600, 5)
     sanityCheck(ticks)
     assertEquals(ticks.size, 21)
     assertEquals(ticks.count(_.major), 6)
@@ -448,31 +451,31 @@ class TicksSuite extends FunSuite {
   test("duration [0, 86400]") {
     val ticks = Ticks.duration(0.0, 86400, 5)
     sanityCheck(ticks)
-    assertEquals(ticks.size, 25)
-    assertEquals(ticks.count(_.major), 7)
+    assertEquals(ticks.size, 17)
+    assertEquals(ticks.count(_.major), 5)
     assertEquals(ticks.head.offset, 0.0)
     assertEquals(ticks.head.label, "0h")
     assertEquals(ticks.last.label, "24h")
   }
 
   test("duration [86400, 86500]") {
-    val ticks = Ticks.duration(0.0, 86400, 5)
+    val ticks = Ticks.duration(86400, 86500, 5)
     sanityCheck(ticks)
-    assertEquals(ticks.size, 25)
-    assertEquals(ticks.count(_.major), 7)
-    assertEquals(ticks.head.offset, 0.0)
-    assertEquals(ticks.head.label, "0h")
-    assertEquals(ticks.last.label, "24h")
+    assertEquals(ticks.size, 21)
+    assertEquals(ticks.count(_.major), 6)
+    assertEquals(ticks.head.offset, 86400.0)
+    assertEquals(ticks.head.label, "0.0m")
+    assertEquals(ticks.last.label, "1.7m")
   }
 
   test("duration [86400, 87500]") {
-    val ticks = Ticks.duration(0.0, 86400, 5)
+    val ticks = Ticks.duration(86400, 87500, 5)
     sanityCheck(ticks)
-    assertEquals(ticks.size, 25)
-    assertEquals(ticks.count(_.major), 7)
-    assertEquals(ticks.head.offset, 0.0)
-    assertEquals(ticks.head.label, "0h")
-    assertEquals(ticks.last.label, "24h")
+    assertEquals(ticks.size, 19)
+    assertEquals(ticks.count(_.major), 5)
+    assertEquals(ticks.head.offset, 86400.0)
+    assertEquals(ticks.head.label, "0m")
+    assertEquals(ticks.last.label, "18m")
   }
 
   test("duration [0, 2592000]") {
@@ -643,16 +646,14 @@ class TicksSuite extends FunSuite {
     assertEquals(ticks.last.label, "950y")
   }
 
-  // TODO goofy edge case due to ieee 754 causes 3 decimals. Fix it some day if
-  // we want.
   test("duration [0.0000001, 0.000001]") {
     val ticks = Ticks.duration(0.0000001, 0.000001, 5)
     sanityCheck(ticks)
     assertEquals(ticks.size, 19)
     assertEquals(ticks.count(_.major), 5)
     assertEquals(ticks.head.offset, 0.0)
-    assertEquals(ticks.head.label, "100.000ns")
-    assertEquals(ticks.last.label, "1000.000ns")
+    assertEquals(ticks.head.label, "100.0ns")
+    assertEquals(ticks.last.label, "1000.0ns")
   }
 
   test("duration [1.0e-10, 1.0e-9]") {
@@ -703,6 +704,16 @@ class TicksSuite extends FunSuite {
     assertEquals(ticks.last.label, "-1.0s")
   }
 
+  test("duration [2.45, 8820.0]") {
+    val ticks = Ticks.duration(2.45, 8820.0, 5)
+    sanityCheck(ticks)
+    assertEquals(ticks.size, 4)
+    assertEquals(ticks.count(_.major), 1)
+    assertEquals(ticks.head.offset, 0.0)
+    assertEquals(ticks.head.label, "1h")
+    assertEquals(ticks.last.label, "2h")
+  }
+
   test("log-linear [0, 1e12], include all") {
     val ticks = Ticks.logLinear(0.0, 1e12, 30)
     assertEquals(ticks.size, 190)
@@ -733,6 +744,74 @@ class TicksSuite extends FunSuite {
     val e = 1498751868000L
     val ticks = Ticks.time(s, e, ZoneOffset.UTC, 5)
     assertEquals(ticks.size, 6)
+    var t = ZonedDateTime.ofInstant(Instant.ofEpochMilli(s), ZoneOffset.UTC)
+    ticks.foreach { tick =>
+      assert(tick.major)
+      assertEquals(tick.timestamp, t.toInstant.toEpochMilli)
+      t = t.plus(9, ChronoUnit.YEARS)
+    }
+  }
+
+  test("time: 1m") {
+    val s = 1498751868000L
+    val e = s + 60_000L
+    val ticks = Ticks.time(s, e, ZoneOffset.UTC, 5)
+    assertEquals(ticks.size, 12)
+    assertEquals(ticks.count(_.major), 4)
+
+    // Verify major ticks are on 10-second boundaries
+    val majorTicks = ticks.filter(_.major)
+    var t = s + 12_000L
+    majorTicks.foreach { tick =>
+      assertEquals(tick.timestamp, t)
+      t += 15_000L
+    }
+  }
+
+  test("time: 10s") {
+    val s = 1498751868000L
+    val e = s + 10_000L
+    val ticks = Ticks.time(s, e, ZoneOffset.UTC, 5)
+    assertEquals(ticks.size, 11)
+    assertEquals(ticks.count(_.major), 2)
+
+    // Verify major ticks are on 5-second boundaries (:50 and :55)
+    val majorTicks = ticks.filter(_.major)
+    var t = s + 2_000L // First major at :50 (+2s from :48)
+    majorTicks.foreach { tick =>
+      assertEquals(tick.timestamp, t)
+      t += 5_000L // Next major at :55 (+5s)
+    }
+  }
+
+  test("time: 10s aligned") {
+    val s = 1498751860000L
+    val e = s + 10_000L
+    val ticks = Ticks.time(s, e, ZoneOffset.UTC, 5)
+    assertEquals(ticks.size, 11)
+    assertEquals(ticks.count(_.major), 3)
+
+    val majorTicks = ticks.filter(_.major)
+    var t = s
+    majorTicks.foreach { tick =>
+      assertEquals(tick.timestamp, t)
+      t += 5_000L
+    }
+  }
+
+  test("time: 8s") {
+    val s = 1325375940000L
+    val e = s + 8_000L
+    val ticks = Ticks.time(s, e, ZoneOffset.UTC, 9)
+    assertEquals(ticks.size, 9)
+    assertEquals(ticks.count(_.major), 2)
+
+    val majorTicks = ticks.filter(_.major)
+    var t = s
+    majorTicks.foreach { tick =>
+      assertEquals(tick.timestamp, t)
+      t += 5_000L
+    }
   }
 
   test("issue-948: [6.667e-3, 0.01]") {

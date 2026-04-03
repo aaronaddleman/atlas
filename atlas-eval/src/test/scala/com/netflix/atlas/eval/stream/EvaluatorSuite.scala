@@ -37,8 +37,8 @@ import com.netflix.atlas.eval.model.LwcSubscription
 import com.netflix.atlas.eval.model.TimeSeriesMessage
 import com.netflix.atlas.eval.stream.Evaluator.DataSources
 import com.netflix.atlas.eval.stream.Evaluator.MessageEnvelope
-import com.netflix.atlas.json.Json
-import com.netflix.atlas.json.JsonSupport
+import com.netflix.atlas.json3.Json
+import com.netflix.atlas.json3.JsonSupport
 import com.netflix.atlas.pekko.DiagnosticMessage
 import com.netflix.spectator.api.DefaultRegistry
 import com.typesafe.config.ConfigFactory
@@ -56,6 +56,10 @@ import scala.util.Success
 import scala.util.Using
 
 class EvaluatorSuite extends FunSuite {
+
+  // Increased to avoid spurious timeouts when running on CI
+  override val munitTimeout: scala.concurrent.duration.Duration =
+    scala.concurrent.duration.Duration(2, "min")
 
   private val targetDir = Paths.get(SrcPath.forProject("atlas-eval"), "target", "EvaluatorSuite")
 
@@ -319,7 +323,7 @@ class EvaluatorSuite extends FunSuite {
   }
 
   test("create processor, expression uses :offset") {
-    val expr = "name,foo,:eq,:sum,PT168H,:offset"
+    val expr = "name,foo,:eq,:sum,1w,:offset"
     val uri = s"synthetic://test/api/v1/graph?q=$expr"
     val msg = s"IllegalArgumentException: :offset not supported for streaming evaluation [[$expr]]"
     val ds1 = Evaluator.DataSources.of(ds("one", uri))
@@ -328,7 +332,7 @@ class EvaluatorSuite extends FunSuite {
 
   test("create processor, expression uses style variant of :offset") {
     val expr = "name,foo,:eq,:sum,(,0h,1w,),:offset"
-    val badExpr = "name,foo,:eq,:sum,PT168H,:offset"
+    val badExpr = "name,foo,:eq,:sum,1w,:offset"
     val uri = s"synthetic://test/api/v1/graph?q=$expr"
     val msg =
       s"IllegalArgumentException: :offset not supported for streaming evaluation [[$badExpr]]"

@@ -162,13 +162,13 @@ case class StyleExpr(expr: TimeSeriesExpr, settings: Map[String, String]) extend
     if (expr.dataExprs.isEmpty) 0L else expr.dataExprs.map(_.offset.toMillis).min
   }
 
-  private def offsets: List[Duration] = {
+  def styleOffsets: List[Duration] = {
     settings.get("offset").fold(List.empty[Duration])(StyleExpr.parseDurationList)
   }
 
   /**
     * Returns a list of style expressions with one entry per offset specified. This is to support
-    * a legacy form or :offset that takes a list and is applied on the style expression. Since
+    * a legacy form of :offset that takes a list and is applied on the style expression. Since
     * further style operations need to get applied to all results we cannot expand until the
     * full expression is evaluated. Should get removed after we have a better story around
     * deprecation.
@@ -176,7 +176,7 @@ case class StyleExpr(expr: TimeSeriesExpr, settings: Map[String, String]) extend
     * If no high level offset is used then a list with this expression will be returned.
     */
   def perOffset: List[StyleExpr] = {
-    offsets match {
+    styleOffsets match {
       case Nil => List(this)
       case vs  => vs.map(d => copy(expr = expr.withOffset(d), settings = settings - "offset"))
     }
@@ -188,7 +188,7 @@ object StyleExpr {
   private val interpreter = new Interpreter(StandardVocabulary.allWords)
 
   private def parseDurationList(s: String): List[Duration] = {
-    import ModelExtractors.*
+    import com.netflix.atlas.core.stacklang.ast.DataType.*
     val ctxt = interpreter.execute(s)
     ctxt.stack match {
       case StringListType(vs) :: Nil =>

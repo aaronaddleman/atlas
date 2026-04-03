@@ -15,13 +15,12 @@
  */
 package com.netflix.atlas.lwc.events
 
-import com.fasterxml.jackson.core.JsonGenerator
-import com.netflix.atlas.json.Json
-import com.netflix.spectator.api.Spectator
-import org.slf4j.LoggerFactory
-
 import java.io.StringWriter
 import scala.util.Using
+import com.netflix.atlas.json3.Json
+import com.netflix.spectator.api.Spectator
+import org.slf4j.LoggerFactory
+import tools.jackson.core.JsonGenerator
 
 /**
   * Represents an event that should be published via an LWC stream. Defines how to
@@ -184,7 +183,7 @@ object LwcEvent {
     * @param event
     *     Event to wrap.
     * @param columns
-    *     Columsn to project into the rwo.
+    *     Columns to project into the row.
     */
   case class Row(event: LwcEvent, columns: List[String]) extends LwcEvent {
 

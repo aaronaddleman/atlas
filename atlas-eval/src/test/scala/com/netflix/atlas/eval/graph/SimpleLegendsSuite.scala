@@ -16,7 +16,7 @@
 package com.netflix.atlas.eval.graph
 
 import com.netflix.atlas.core.model.CustomVocabulary
-import com.netflix.atlas.core.model.ModelExtractors
+import com.netflix.atlas.core.model.ModelDataTypes
 import com.netflix.atlas.core.model.StyleExpr
 import com.netflix.atlas.core.stacklang.Interpreter
 import com.typesafe.config.ConfigFactory
@@ -33,8 +33,8 @@ class SimpleLegendsSuite extends FunSuite {
       .execute(str)
       .stack
       .map {
-        case ModelExtractors.PresentationType(t) => t
-        case v                                   => throw new MatchError(v)
+        case ModelDataTypes.PresentationType(t) => t
+        case v                                  => throw new MatchError(v)
       }
       .reverse
       .flatMap(_.perOffset)
@@ -158,5 +158,30 @@ class SimpleLegendsSuite extends FunSuite {
   test("multi: same name with math") {
     val vs = legends("name,cpu,:eq,:sum,:dup,4,:add")
     assertEquals(vs, List("cpu", "cpu"))
+  }
+
+  test("custom: after other operations") {
+    val expr = "name,cpu,:eq,id,user,:eq,:and,(,node,),:by,total,5,:topk,:test-rewrite"
+    assertEquals(legends(expr), List("$(node)"))
+  }
+
+  test("custom: as aggregate function") {
+    val expr = "name,cpu,:eq,id,user,:eq,:and,:test-rewrite"
+    assertEquals(legends(expr), List("cpu"))
+  }
+
+  test("custom: as aggregate function with grouping") {
+    val expr = "name,cpu,:eq,id,user,:eq,:and,:test-rewrite,(,node,),:by"
+    assertEquals(legends(expr), List("$(node)"))
+  }
+
+  test("custom: after aggregate function") {
+    val expr = "name,cpu,:eq,id,user,:eq,:and,:max,:test-rewrite"
+    assertEquals(legends(expr), List("cpu"))
+  }
+
+  test("custom: multi-level grouping") {
+    val expr = "name,cpu,:eq,id,user,:eq,:and,:max,(,app,node,),:by,:test-rewrite,(,app,),:by"
+    assertEquals(legends(expr), List("$(app)"))
   }
 }

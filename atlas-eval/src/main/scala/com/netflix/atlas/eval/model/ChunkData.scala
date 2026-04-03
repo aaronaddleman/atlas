@@ -15,8 +15,8 @@
  */
 package com.netflix.atlas.eval.model
 
-import com.fasterxml.jackson.core.JsonGenerator
-import com.netflix.atlas.json.JsonSupport
+import com.netflix.atlas.json3.JsonSupport
+import tools.jackson.core.JsonGenerator
 
 /**
   * Chunk of data for LWC and fetch responses.
@@ -32,7 +32,7 @@ sealed trait ChunkData extends JsonSupport {
   * this chunk.
   *
   * @param values
-  *     Time series values assocated with a [[TimeSeriesMessage]].
+  *     Time series values associated with a [[TimeSeriesMessage]].
   */
 final case class ArrayData(values: Array[Double]) extends ChunkData {
 
@@ -42,8 +42,8 @@ final case class ArrayData(values: Array[Double]) extends ChunkData {
 
   override def encode(gen: JsonGenerator): Unit = {
     gen.writeStartObject()
-    gen.writeStringField("type", "array")
-    gen.writeArrayFieldStart("values")
+    gen.writeStringProperty("type", "array")
+    gen.writeArrayPropertyStart("values")
     var i = 0
     while (i < values.length) {
       val v = values(i)

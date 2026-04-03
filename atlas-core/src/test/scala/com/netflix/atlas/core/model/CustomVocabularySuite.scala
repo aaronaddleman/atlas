@@ -50,8 +50,8 @@ class CustomVocabularySuite extends FunSuite {
   private def eval(program: String): TimeSeriesExpr = {
     val result = interpreter.execute(program)
     result.stack match {
-      case ModelExtractors.TimeSeriesType(v) :: Nil => v
-      case v                                        => throw new MatchError(v)
+      case ModelDataTypes.TimeSeriesExprType(v) :: Nil => v
+      case v                                           => throw new MatchError(v)
     }
   }
 
@@ -113,7 +113,7 @@ class CustomVocabularySuite extends FunSuite {
     assertEquals(evalExpr, expected)
     assertEquals(
       displayExpr.toString,
-      s"$cpuUser,cluster,foo,:eq,:and,:node-avg,PT1H,:offset,(,name,),:by"
+      s"$cpuUser,cluster,foo,:eq,:and,:node-avg,1h,:offset,(,name,),:by"
     )
   }
 

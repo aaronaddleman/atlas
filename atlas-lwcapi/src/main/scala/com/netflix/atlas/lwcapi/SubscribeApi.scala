@@ -26,12 +26,11 @@ import org.apache.pekko.stream.scaladsl.Flow
 import org.apache.pekko.stream.scaladsl.Keep
 import org.apache.pekko.stream.scaladsl.Sink
 import org.apache.pekko.stream.scaladsl.Source
-import org.apache.pekko.util.ByteString
 import com.netflix.atlas.eval.model.LwcDataExpr
 import com.netflix.atlas.eval.model.LwcHeartbeat
 import com.netflix.atlas.eval.model.LwcMessages
 import com.netflix.atlas.eval.model.LwcSubscriptionV2
-import com.netflix.atlas.json.JsonSupport
+import com.netflix.atlas.json3.JsonSupport
 import com.netflix.atlas.pekko.CustomDirectives.*
 import com.netflix.atlas.pekko.DiagnosticMessage
 import com.netflix.atlas.pekko.StreamOps
@@ -105,7 +104,7 @@ class SubscribeApi(
         case BinaryMessage.Strict(str) =>
           Source.single(str)
         case msg: BinaryMessage =>
-          msg.dataStream.fold(ByteString.empty)(_ ++ _)
+          msg.dataStream.via(StreamOps.collectBytes)
       }
       .via(new WebSocketSessionManager(streamMeta, register, subscribe))
       .flatMapMerge(Int.MaxValue, msg => msg)
@@ -157,7 +156,9 @@ class SubscribeApi(
     val handler = new QueueHandler(streamMeta, queue)
     sm.register(streamMeta, handler)
 
-    // Heartbeat messages to ensure that the socket is never idle
+    // Heartbeat messages to ensure that the socket is never idle. A default heartbeat
+    // with a 5s step is used before any subscriptions are established to prevent idle
+    // timeouts when subscription delivery is delayed.
     val heartbeatSrc = Source
       .tick(0.seconds, 5.seconds, NotUsed)
       .flatMapConcat { _ =>
@@ -174,12 +175,15 @@ class SubscribeApi(
             // timestamp is delayed by one interval
             LwcHeartbeat(stepAlignedTime(step) - step, step)
           }
-        Source(steps)
+        if (steps.isEmpty)
+          Source.single(LwcHeartbeat(stepAlignedTime(5_000L) - 5_000L, 5_000L))
+        else
+          Source(steps)
       }
 
     Source
       .fromPublisher(pub)
-      .flatMapConcat(Source.apply)
+      .flatMapConcat(vs => Source(vs))
       .merge(heartbeatSrc)
       .viaMat(StreamOps.monitorFlow(registry, "StreamApi"))(Keep.left)
   }

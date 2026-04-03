@@ -22,18 +22,17 @@ import org.apache.pekko.http.scaladsl.model.StatusCodes
 import org.apache.pekko.http.scaladsl.server.Directives.*
 import org.apache.pekko.http.scaladsl.server.Route
 import com.netflix.atlas.core.model.Expr
+import com.netflix.atlas.core.model.ExprNormalizer
 import com.netflix.atlas.core.model.FilterExpr
-import com.netflix.atlas.core.model.ModelExtractors
+import com.netflix.atlas.core.model.ModelDataTypes
 import com.netflix.atlas.core.model.Query
 import com.netflix.atlas.core.model.StyleExpr
-import com.netflix.atlas.core.model.TimeSeriesExpr
 import com.netflix.atlas.core.stacklang.Context
 import com.netflix.atlas.core.stacklang.Interpreter
 import com.netflix.atlas.core.stacklang.Word
 import com.netflix.atlas.core.util.Features
-import com.netflix.atlas.core.util.RefIntHashMap
 import com.netflix.atlas.core.util.Strings
-import com.netflix.atlas.json.Json
+import com.netflix.atlas.json3.Json
 import com.netflix.atlas.pekko.CustomDirectives.*
 import com.netflix.atlas.pekko.WebApi
 
@@ -74,6 +73,11 @@ class ExprApi extends WebApi {
           complete(processQueriesRequest(q, vocab))
         }
       } ~
+      endpointPath("rewrite") {
+        parameters("q") { q =>
+          complete(processRewriteRequest(q))
+        }
+      } ~
       endpointPath("strip") {
         parameters("q", "k".repeated, "r".repeated) { (q, keys, vocabsToRemove) =>
           complete(processStripRequest(q, keys.toSet, vocabsToRemove.toSet))
@@ -104,8 +108,8 @@ class ExprApi extends WebApi {
       case _ =>
         // Expecting a style expression that can be used in a graph
         val invalidItem = stack.find {
-          case ModelExtractors.PresentationType(_) => false
-          case _                                   => true
+          case ModelDataTypes.PresentationType(_) => false
+          case _                                  => true
         }
 
         invalidItem.foreach { item =>
@@ -153,7 +157,7 @@ class ExprApi extends WebApi {
 
   // This check is needed to be sure an operation will work if matches is not exhaustive. In
   // some cases it only validates types, but not acceptable values such as :time. For others like
-  // macros it alwasy returns true. This ensures the operation will actually be successful before
+  // macros it always returns true. This ensures the operation will actually be successful before
   // returning to a user.
   private def execWorks(interpreter: Interpreter, w: Word, ctxt: Context): Boolean = {
     Try(interpreter.executeProgram(List(s":${w.name}"), ctxt)).isSuccess
@@ -190,7 +194,7 @@ class ExprApi extends WebApi {
     val result = interpreter.execute(expr, features = Features.UNSTABLE)
 
     val exprs = result.stack.collect {
-      case ModelExtractors.PresentationType(t) => t
+      case ModelDataTypes.PresentationType(t) => t
     }
     val queries = exprs
       .flatMap(_.expr.dataExprs.map(_.query))
@@ -212,7 +216,7 @@ class ExprApi extends WebApi {
     val result = interpreter.execute(expr)
 
     val exprs = result.stack.collect {
-      case ModelExtractors.PresentationType(t) =>
+      case ModelDataTypes.PresentationType(t) =>
         stripVocabulary(t.rewrite(stripKeys(keys)), vocabsToRemove.toList).toString
     }
 
@@ -256,6 +260,16 @@ class ExprApi extends WebApi {
     }
   }
 
+  /**
+    * Rewrite a graph expression to phase out deprecated usage. Currently, it will
+    * only rewrite the legacy offset usage.
+    */
+  private def processRewriteRequest(expr: String): HttpResponse = {
+    val interpreter = Interpreter(vocabulary.allWords)
+    val rewrittenExprs = ExprApi.rewrite(expr, interpreter)
+    jsonResponse(rewrittenExprs)
+  }
+
   /** Encode `obj` as json and create the HttpResponse. */
   private def jsonResponse(obj: AnyRef): HttpResponse = {
     val data = Json.encode(obj)
@@ -266,223 +280,107 @@ class ExprApi extends WebApi {
 
 object ExprApi {
 
+  private val normalizer = new ExprNormalizer(ApiSettings.normalizeConfig)
+
+  /**
+    * Normalizes an Atlas expression program into a canonical string representation.
+    *
+    * This method parses the program string using the provided interpreter, extracts
+    * style expressions from the stack, and normalizes them into consistent, comparable
+    * string forms. Normalization includes:
+    *
+    *  - Standardizing legend variable syntax to always use parentheses: `$(var)`
+    *  - Sorting query clauses by importance (prefix keys, regular keys, suffix keys)
+    *  - Removing redundant clauses and simplifying queries
+    *  - Converting stat filters to their canonical forms
+    *  - Removing explicit `:const` and `:line` suffixes
+    *
+    * @param program
+    *     The Atlas expression program string to normalize (e.g., "name,cpu,:eq,:avg")
+    * @param interpreter
+    *     The interpreter configured with the appropriate vocabulary for parsing
+    * @return
+    *     A list of normalized expression strings in user-expected order (reversed from stack order)
+    */
   def normalize(program: String, interpreter: Interpreter): List[String] = {
     normalize(eval(interpreter, program))
   }
 
+  /**
+    * Normalizes a list of style expressions into canonical string representations.
+    *
+    * This overload operates directly on parsed style expressions rather than a program string.
+    * It applies the same normalization transformations as the string-based version.
+    *
+    * @param exprs
+    *     The list of style expressions to normalize
+    * @return
+    *     A list of normalized expression strings in user-expected order (reversed from stack order)
+    */
   def normalize(exprs: List[StyleExpr]): List[String] = {
-    // Normalize the legend vars
-    val styleExprs = exprs.map(normalizeLegendVars)
-
-    // Normalized expression strings
-    val normalized = exprStrings(styleExprs)
-
-    // Reverse the list to match the order the user would expect
-    normalized.reverse
-  }
-
-  // For use-cases such as performing automated rewrites of expressions to move off of legacy
-  // data it is more convenient to have a consistent way of showing variables. This ensures
-  // that it will always include the parenthesis.
-  // https://github.com/Netflix/atlas/issues/863
-  private def normalizeLegendVars(expr: StyleExpr): StyleExpr = {
-    expr.settings.get("legend").fold(expr) { legend =>
-      val settings = expr.settings + ("legend" -> Strings.substitute(legend, k => s"$$($k)"))
-      expr.copy(settings = settings)
-    }
+    exprs.map(normalizer.normalizeToString).reverse
   }
 
   private def eval(interpreter: Interpreter, expr: String): List[StyleExpr] = {
     interpreter.execute(expr, features = Features.UNSTABLE).stack.collect {
-      case ModelExtractors.PresentationType(t) => t
+      case ModelDataTypes.PresentationType(t) => t
     }
   }
 
-  private def normalizeStat(expr: StyleExpr): StyleExpr = {
-    expr
-      .rewrite {
-        case FilterExpr.Filter(ts1, ts2) =>
-          val updated = ts2.rewrite {
-            case FilterExpr.Stat(ts, s, None) if ts == ts1 =>
-              s match {
-                case "avg"   => FilterExpr.StatAvg
-                case "min"   => FilterExpr.StatMin
-                case "max"   => FilterExpr.StatMax
-                case "last"  => FilterExpr.StatLast
-                case "total" => FilterExpr.StatTotal
-                case "count" => FilterExpr.StatCount
-                case _       => FilterExpr.Stat(ts, s, None)
-              }
+  /**
+    * Rewrites an Atlas expression to phase out deprecated usage patterns.
+    *
+    * Currently focuses on rewriting legacy offset usage to the canonical form:
+    *
+    *  - Single zero offset: Removes the offset setting entirely
+    *  - Single non-zero offset: Converts to `:offset` operation (e.g., `expr,1h,:offset`)
+    *  - Multiple offsets: Extracts the base expression into a variable and applies each offset
+    *    separately (e.g., `Query0,expr,:set,Query0,:get,Query0,:get,1h,:offset`)
+    *
+    * This is useful for migrating expressions that use the deprecated style-based offset
+    * settings to the newer operator-based approach.
+    *
+    * @param expr
+    *     The Atlas expression string to rewrite
+    * @param interpreter
+    *     The interpreter configured with the graph vocabulary for parsing
+    * @return
+    *     A list of rewritten expression strings, one per style expression in the input
+    */
+  def rewrite(expr: String, interpreter: Interpreter): List[String] = {
+    val result = interpreter.execute(expr, features = Features.UNSTABLE)
+
+    val exprs = result.stack.collect {
+      case ModelDataTypes.PresentationType(t) => t
+    }
+
+    exprs.zipWithIndex.map(t => rewriteOffset(t._1, t._2))
+  }
+
+  private def rewriteOffset(expr: StyleExpr, i: Int): String = {
+    expr.styleOffsets match {
+      case Nil =>
+        expr.toString
+      case d :: Nil if d.isZero =>
+        removeOffsets(expr).toString
+      case d :: Nil =>
+        s"${removeOffsets(expr)},${Strings.toString(d)},:offset"
+      case ds =>
+        val varName = s"Query$i"
+        val baseExpr = s"$varName,${removeOffsets(expr)},:set"
+        val offsets = ds
+          .map { d =>
+            if (d.isZero)
+              s"$varName,:get"
+            else
+              s"$varName,:get,${Strings.toString(d)},:offset"
           }
-          FilterExpr.Filter(ts1, updated.asInstanceOf[TimeSeriesExpr])
-      }
-      .asInstanceOf[StyleExpr]
-  }
-
-  private def exprStrings(exprs: List[StyleExpr]): List[String] = {
-    // Rewrite the expressions and convert to a normalized strings
-    exprs.map { expr =>
-      val rewritten = normalizeStat(expr).rewrite {
-        case q: Query => sort(q)
-      }
-      // Remove explicit :const and :line, it can be determined from implicit conversion
-      // and add visual clutter
-      rewritten.toString
-        .replace(",:const", "")
-        .replace(",:line", "")
+          .mkString(",")
+        s"$baseExpr,$offsets"
     }
   }
 
-  private def normalizeClauses(query: Query): Query = query match {
-    case Query.In(k, vs) =>
-      val values = vs.sorted.distinct
-      if (values.lengthCompare(1) == 0)
-        Query.Equal(k, values.head)
-      else
-        Query.In(k, values)
-    case q => q
-  }
-
-  /**
-    * For conjunctions that are combined with OR, if a given conjunction is a superset
-    * of every other conjunction, then it can be removed because an entry would be matched
-    * based on the other branches of the OR, so the additional conditions do not change the
-    * outcome.
-    */
-  private def removeRedundantClauses(queries: List[List[Query]]): List[List[Query]] = {
-    queries match {
-      case Nil      => queries
-      case _ :: Nil => queries
-      case _ =>
-        val sets = queries.map(_.toSet)
-        queries.filterNot { q =>
-          sets.forall(_.subsetOf(q.toSet))
-        }
-    }
-  }
-
-  /**
-    * Combines a set of query clauses together using AND. Common query clauses that can
-    * be applied later using :cq can be added to the exclude set so they will get ignored
-    * here. The clauses will be sorted so any queries with the exact same set of clauses
-    * will have an equal result query even if they were in different orders in the input
-    * expression string.
-    */
-  private def sort(query: Query): Query = {
-    val simplified = Query.simplify(query)
-    val normalized = Query
-      .dnfList(simplified)
-      .map { q =>
-        Query
-          .cnfList(q)
-          .map(normalizeClauses)
-          .distinct
-          .sorted(QueryOrdering)
-      }
-      .distinct
-    removeRedundantClauses(normalized)
-      .map { qs =>
-        qs.reduce { (q1, q2) =>
-          Query.And(q1, q2)
-        }
-      }
-      .sortWith(_.toString < _.toString) // order OR clauses
-      .reduce { (q1, q2) =>
-        Query.Or(q1, q2)
-      }
-  }
-
-  /**
-    * Custom ordering for queries that provides consistent and predictable sorting based on
-    * tag key importance and position.
-    *
-    * The ordering follows these rules in priority order:
-    *
-    * 1. '''Prefix keys''': Keys specified in `ApiSettings.normalizePrefixKeys` are ordered
-    *    by their position in the list. These typically represent the most important dimensions
-    *    (e.g., name, nf.app, nf.stack, nf.cluster) and will appear first in normalized queries.
-    *
-    * 2. '''Regular keys''': Keys that are neither in the prefix nor suffix lists are ordered
-    *    lexically by the query's string representation.
-    *
-    * 3. '''Suffix keys''': Keys specified in `ApiSettings.normalizeSuffixKeys` are ordered
-    *    by their position in the list. These typically represent less important dimensions
-    *    (e.g., statistic) and will appear last in normalized queries.
-    *
-    * 4. '''Equal keys''': When two queries have the same key, they are compared by their
-    *    string representation to ensure deterministic ordering.
-    *
-    * Example ordering with prefix keys [name, nf.app] and suffix keys [statistic]:
-    * {{{
-    *   name,foo,:eq              // prefix key, position 0
-    *   nf.app,bar,:eq            // prefix key, position 1
-    *   app,baz,:eq               // regular key (lexical)
-    *   zoo,test,:eq              // regular key (lexical)
-    *   statistic,count,:eq       // suffix key, position 0
-    * }}}
-    */
-  private object QueryOrdering extends Ordering[Query] {
-
-    private val prefixPositionMap = createPositionMap(ApiSettings.normalizePrefixKeys)
-    private val suffixPositionMap = createPositionMap(ApiSettings.normalizeSuffixKeys)
-
-    private def createPositionMap(vs: List[String]): RefIntHashMap[String] = {
-      val positions = new RefIntHashMap[String](vs.size)
-      vs.zipWithIndex.foreach {
-        case (v, i) => positions.put(v, i)
-      }
-      positions
-    }
-
-    @scala.annotation.tailrec
-    private def key(query: Query): String = {
-      query match {
-        case q: Query.KeyQuery => q.k
-        case Query.And(q1, _)  => key(q1)
-        case Query.Or(q1, _)   => key(q1)
-        case Query.Not(q)      => key(q)
-        case _                 => ""
-      }
-    }
-
-    override def compare(q1: Query, q2: Query): Int = {
-      val k1 = key(q1)
-      val k2 = key(q2)
-
-      // If both keys are equal, compare toString of queries
-      if (k1 == k2) {
-        q1.toString.compare(q2.toString)
-      } else {
-        val p1 = prefixPositionMap.get(k1, -1)
-        val p2 = prefixPositionMap.get(k2, -1)
-        val s1 = suffixPositionMap.get(k1, -1)
-        val s2 = suffixPositionMap.get(k2, -1)
-
-        // If both in prefix map, use prefix positions
-        if (p1 >= 0 && p2 >= 0) {
-          p1.compare(p2)
-        }
-        // If one in prefix and the other isn't, it comes first
-        else if (p1 >= 0) {
-          -1
-        } else if (p2 >= 0) {
-          1
-        }
-        // If one in suffix and the other isn't, it comes after
-        else if (s1 >= 0 && s2 < 0) {
-          1
-        } else if (s2 >= 0 && s1 < 0) {
-          -1
-        }
-        // If both in suffix map, use suffix positions
-        else if (s1 >= 0 && s2 >= 0) {
-          s1.compare(s2)
-        }
-        // Otherwise normal lexical ordering
-        else {
-          q1.toString.compare(q2.toString)
-        }
-      }
-    }
+  private def removeOffsets(expr: StyleExpr): StyleExpr = {
+    expr.copy(settings = expr.settings - "offset")
   }
 }

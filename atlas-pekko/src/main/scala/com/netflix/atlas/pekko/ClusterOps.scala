@@ -15,9 +15,11 @@
  */
 package com.netflix.atlas.pekko
 
+import com.netflix.atlas.pekko.StreamOps.BlockingSourceQueue
 import com.netflix.atlas.pekko.StreamOps.SourceQueue
 import org.apache.pekko.NotUsed
 import org.apache.pekko.stream.Attributes
+import org.apache.pekko.stream.DelayOverflowStrategy
 import org.apache.pekko.stream.FlowShape
 import org.apache.pekko.stream.Inlet
 import org.apache.pekko.stream.Outlet
@@ -227,4 +229,213 @@ object ClusterOps extends StrictLogging {
 
   /** Data intended for members of a cluster. */
   case class Data[M <: AnyRef, D](data: Map[M, D]) extends GroupByMessage[M, D]
+
+  /**
+    * Wrapper for data with a delay to apply before processing.
+    */
+  private case class DelayedData[D](data: D, delay: FiniteDuration) {
+
+    def source: Source[D, NotUsed] = {
+      Source.single(data).delay(delay, DelayOverflowStrategy.backpressure)
+    }
+  }
+
+  /**
+    * Broadcasts the same data to all members of a cluster with randomized ordering
+    * and rate-based staggering to spread network load.
+    *
+    * Similar to [groupBy] but optimized for broadcast scenarios where all members receive
+    * the same data. Members are shuffled randomly on each broadcast. The delay between
+    * sends is calculated based on payload size and target network rate to prevent
+    * network saturation when many clients broadcast simultaneously.
+    *
+    * @param context
+    *     Parameters to control the behavior of the operation, including target rate.
+    * @tparam M
+    *     Key identifying a member of a cluster.
+    * @tparam D
+    *     Input data to broadcast to all members. Must provide size information.
+    * @tparam O
+    *     Output data that will be flattened after the mapping.
+    * @return
+    *     Overall flow that performs the staggered broadcast and merges the output data.
+    */
+  def staggeredBroadcast[M <: AnyRef, D, G <: GroupByMessage[M, D], O](
+    context: StaggeredBroadcastContext[M, D, O]
+  ): Flow[G, O, NotUsed] = {
+    Flow[G]
+      .via(new ClusterStaggeredBroadcast[M, D, G, O](context))
+      .flatMapMerge(Int.MaxValue, sources => Source(sources))
+      .flatMapMerge(Int.MaxValue, source => source)
+  }
+
+  private final class ClusterStaggeredBroadcast[M <: AnyRef, D, G <: GroupByMessage[M, D], O](
+    context: StaggeredBroadcastContext[M, D, O]
+  ) extends GraphStage[FlowShape[G, List[Source[O, NotUsed]]]] {
+
+    private val in = Inlet[GroupByMessage[M, D]]("ClusterStaggeredBroadcast.in")
+    private val out = Outlet[List[Source[O, NotUsed]]]("ClusterStaggeredBroadcast.out")
+
+    override def shape: FlowShape[GroupByMessage[M, D], List[Source[O, NotUsed]]] =
+      FlowShape(in, out)
+
+    override def createLogic(inheritedAttributes: Attributes): GraphStageLogic = {
+      new GraphStageLogic(shape) with InHandler with OutHandler {
+
+        private val registry = context.registry
+        private val membersSources = mutable.HashMap.empty[M, BlockingSourceQueue[DelayedData[D]]]
+        private val pendingSources = mutable.ListBuffer.empty[Source[O, NotUsed]]
+        private val random = new scala.util.Random()
+
+        override def onPush(): Unit = {
+          val msg = grab(in)
+          msg match {
+            case Cluster(members: Set[M]) => updateMembers(members)
+            case Data(data: Map[M, D])    => broadcastStaggered(data)
+          }
+        }
+
+        private def updateMembers(members: Set[M]): Unit = {
+          val current = membersSources.keySet.toSet
+
+          val removed = current -- members
+          if (removed.nonEmpty) {
+            logger.debug(s"members removed: $removed")
+          }
+          removed.foreach { m =>
+            membersSources.remove(m).foreach { queue =>
+              logger.debug(s"stopping $m")
+              queue.completeAndClear()
+            }
+          }
+
+          val added = members -- current
+          if (added.nonEmpty) {
+            logger.debug(s"members added: $added")
+          }
+          added.foreach { m =>
+            val queue = new java.util.concurrent.ArrayBlockingQueue[DelayedData[D]](1)
+            val (blockingQueue, source) = StreamOps
+              .wrapBlockingQueue[DelayedData[D]](registry, context.id, queue, dropNew = false)
+              // Apply delay and unwrap to original data
+              .flatMapConcat(_.source)
+              .via(newSubFlow(m))
+              .preMaterialize()(materializer)
+
+            membersSources += m -> blockingQueue
+            pendingSources += source
+          }
+
+          pushPending()
+          pull(in)
+        }
+
+        private def pushPending(): Unit = {
+          if (isAvailable(out) && pendingSources.nonEmpty) {
+            val sources = pendingSources.toList
+            pendingSources.clear()
+            push(out, sources)
+          }
+        }
+
+        private def newSubFlow(m: M): Flow[D, O, NotUsed] = {
+          import OpportunisticEC.*
+          RestartFlow
+            .withBackoff(RestartSettings(100.millis, 1.second, 0.0)) { () =>
+              context.client(m).watchTermination() { (_, f) =>
+                f.onComplete {
+                  case Success(_) => logger.trace(s"shutdown stream for $m")
+                  case Failure(t) => logger.warn(s"restarting failed stream for $m", t)
+                }
+              }
+            }
+            .recoverWithRetries(
+              -1,
+              {
+                // Ignore non-fatal failure that may happen when a member is removed from cluster
+                case e: Exception =>
+                  logger.debug(s"suppressing failure for: $m", e)
+                  Source.empty[O]
+              }
+            )
+        }
+
+        private def broadcastStaggered(data: Map[M, D]): Unit = {
+          // Extract the value to broadcast (should be same for all members)
+          val broadcastData = data.headOption.map(_._2)
+
+          broadcastData.foreach { d =>
+            // Get payload size
+            val payloadSize = context.sizeOf(d)
+
+            // Calculate delay between sends based on payload size and target rate
+            // delay = payload_size / rate (in seconds), convert to millis
+            val delayMillis = (payloadSize * 1000.0 / context.targetRateBytesPerSec).toLong
+
+            // Shuffle members to randomize order and prevent coordinated traffic patterns
+            val shuffledMembers = random.shuffle(membersSources.toList)
+
+            // Offer wrapped data with calculated delay to each member
+            shuffledMembers.zipWithIndex.foreach {
+              case ((_, queue), index) =>
+                val delay = (index * delayMillis).millis
+                queue.offer(DelayedData(d, delay))
+            }
+
+            val numMembers = shuffledMembers.size
+            val maxDelay = ((numMembers - 1) * delayMillis).millis
+            logger.debug(s"sending $payloadSize bytes to $numMembers members over $maxDelay")
+          }
+
+          pull(in)
+        }
+
+        override def onPull(): Unit = {
+          pushPending()
+          if (!hasBeenPulled(in)) {
+            pull(in)
+          }
+        }
+
+        override def onUpstreamFinish(): Unit = {
+          membersSources.values.foreach(_.complete())
+          super.onUpstreamFinish()
+        }
+
+        setHandlers(in, out, this)
+      }
+    }
+  }
+
+  /**
+    * Context settings for the staggered broadcast operation.
+    *
+    * @param client
+    *     Function that creates a sub-flow for a member of a cluster.
+    * @param sizeOf
+    *     Function to get the size in bytes of the data being broadcast.
+    * @param targetRateBytesPerSec
+    *     Target network rate in bytes per second for spreading the broadcast.
+    *     Delay between sends is calculated as: payload_size / target_rate.
+    *     Must be > 0. Default is 125,000 bytes/sec (1 Mbps).
+    * @param registry
+    *     Registry providing basic stats for the queue. Default is NoopRegistry.
+    * @param id
+    *     Id used with the queue metrics.
+    * @tparam M
+    *     Key identifying a member of a cluster.
+    * @tparam D
+    *     Input data to broadcast to all members.
+    * @tparam O
+    *     Output data that will be flattened after the mapping.
+    */
+  case class StaggeredBroadcastContext[M <: AnyRef, D, O](
+    client: M => Flow[D, O, NotUsed],
+    sizeOf: D => Long,
+    targetRateBytesPerSec: Long = 125000, // 1 Mbps default
+    registry: Registry = noopRegistry,
+    id: String = "clusterStaggeredBroadcast"
+  ) {
+    require(targetRateBytesPerSec > 0, "targetRateBytesPerSec must be > 0")
+  }
 }

@@ -56,8 +56,8 @@ import com.netflix.atlas.eval.stream.Evaluator.DataSource
 import com.netflix.atlas.eval.stream.Evaluator.DataSources
 import com.netflix.atlas.eval.stream.Evaluator.DatapointGroup
 import com.netflix.atlas.eval.stream.Evaluator.MessageEnvelope
-import com.netflix.atlas.json.Json
-import com.netflix.atlas.json.JsonSupport
+import com.netflix.atlas.json3.Json
+import com.netflix.atlas.json3.JsonSupport
 import com.netflix.atlas.pekko.ClusterOps
 import com.netflix.atlas.pekko.DiagnosticMessage
 import com.netflix.atlas.pekko.StreamOps
@@ -106,6 +106,12 @@ private[stream] abstract class EvaluatorImpl(
 
   // Should subscription messages be compressed?
   private val compressSubMsgs = config.getBoolean("atlas.eval.stream.compress-sub-messages")
+
+  // Target rate in bytes/sec for staggering subscription broadcasts to prevent network saturation
+  private val broadcastTargetRate = config.getLong("atlas.eval.stream.broadcast-target-rate")
+
+  // Output buffer size for the eval stage
+  private val outputBufferSize = config.getInt("atlas.eval.stream.output-buffer-size")
 
   // Counter for message that cannot be parsed
   private val badMessages = registry.counter("atlas.eval.badMessages")
@@ -224,7 +230,7 @@ private[stream] abstract class EvaluatorImpl(
   }
 
   /**
-    * Internal API, may change in future releases, should only used by internal components
+    * Internal API, may change in future releases, should only be used by internal components
     * to maximize throughput under heavy load by enabling operator fusion optimization.
     */
   def createStreamsFlow: Flow[DataSources, MessageEnvelope, NotUsed] = {
@@ -307,6 +313,8 @@ private[stream] abstract class EvaluatorImpl(
       .groupBy(Int.MaxValue, stepSize, allowClosedSubstreamRecreation = true)
       .via(new FinalExprEval(context.interpreter, enableNoDataMsgs))
       .mergeSubstreams
+      .via(StreamOps.buffer(registry, "EvalOutput", outputBufferSize))
+      .async
       .via(context.monitorFlow("12_OutputSources"))
       .flatMapConcat(s => s)
       .via(context.monitorFlow("13_OutputMessages"))
@@ -491,6 +499,7 @@ private[stream] abstract class EvaluatorImpl(
         val instances = sourcesAndGroups._2.groups.flatMap(_.instances).toSet
         val exprs = toExprSet(sourcesAndGroups._1, context.interpreter)
         val bytes = LwcMessages.encodeBatch(exprs.toSeq, compressSubMsgs)
+        // Use Data with same bytes for all members for staggered broadcast
         val dataMap = instances.map(i => i -> bytes).toMap
         Source(
           List(
@@ -501,11 +510,11 @@ private[stream] abstract class EvaluatorImpl(
       }
       // Repeat the last received element which will be the data map with the set
       // expressions to subscribe to. In the event of a connection failure the cluster
-      // group by step will automatically reconnect, but the data message needs to be
+      // staggered broadcast will automatically reconnect, but the data message needs to be
       // resent. This ensures the most recent set of subscriptions will go out at a
       // regular cadence.
       .via(StreamOps.repeatLastReceived(5.seconds))
-      .via(ClusterOps.groupBy(createGroupByContext))
+      .via(ClusterOps.staggeredBroadcast(createStaggeredBroadcastContext))
       .mapAsync(parsingNumThreads) { msg =>
         // This step is placed after merge of streams so there is a single
         // use of the pool and it is easier to track the concurrent usage.
@@ -515,11 +524,13 @@ private[stream] abstract class EvaluatorImpl(
       }
   }
 
-  private def createGroupByContext: ClusterOps.GroupByContext[Instance, ByteString, ByteString] = {
-    ClusterOps.GroupByContext(
-      instance => createWebSocketFlow(instance),
-      registry,
-      queueSize = 10
+  private def createStaggeredBroadcastContext
+    : ClusterOps.StaggeredBroadcastContext[Instance, ByteString, ByteString] = {
+    ClusterOps.StaggeredBroadcastContext(
+      client = instance => createWebSocketFlow(instance),
+      sizeOf = bytes => bytes.length.toLong,
+      targetRateBytesPerSec = broadcastTargetRate,
+      registry = registry
     )
   }
 
@@ -550,7 +561,7 @@ private[stream] abstract class EvaluatorImpl(
         case BinaryMessage.Strict(str) =>
           Source.single(str)
         case msg: BinaryMessage =>
-          msg.dataStream.fold(ByteString.empty)(_ ++ _)
+          msg.dataStream.via(StreamOps.collectBytes)
       }
       .mapMaterializedValue(_ => NotUsed)
   }

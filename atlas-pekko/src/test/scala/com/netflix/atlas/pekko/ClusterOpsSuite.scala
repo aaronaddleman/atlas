@@ -142,4 +142,105 @@ class ClusterOpsSuite extends FunSuite {
     assertEquals(seq.filter(_._1 == "a").map(_._2), Seq(1, 5))
     assertEquals(seq.filter(_._1 == "b").map(_._2), Seq(2, 4, 6))
   }
+
+  test("staggeredBroadcast: empty cluster") {
+    val input: List[ClusterOps.GroupByMessage[String, String]] = List(
+      ClusterOps.Cluster(Set.empty[String]),
+      ClusterOps.Data(Map("a" -> "data"))
+    )
+    val context = ClusterOps.StaggeredBroadcastContext[String, String, String](
+      client = (_: String) => Flow[String].map(v => v),
+      sizeOf = _.length.toLong
+    )
+    val future = Source(input)
+      .via(ClusterOps.staggeredBroadcast(context))
+      .runWith(Sink.seq[String])
+    val seq = Await.result(future, Duration.Inf)
+    assert(seq.isEmpty)
+  }
+
+  test("staggeredBroadcast: single member") {
+    val input: List[ClusterOps.GroupByMessage[String, String]] = List(
+      ClusterOps.Cluster(Set("a")),
+      ClusterOps.Data(Map("a" -> "data1"))
+    )
+    val context = ClusterOps.StaggeredBroadcastContext[String, String, String](
+      client = (_: String) => Flow[String].map(v => v),
+      sizeOf = _.length.toLong
+    )
+    val future = Source(input)
+      .via(ClusterOps.staggeredBroadcast(context))
+      .runWith(Sink.seq[String])
+    val seq = Await.result(future, Duration.Inf)
+    assertEquals(seq.sorted, Seq("data1"))
+  }
+
+  test("staggeredBroadcast: multiple members receive same data") {
+    val input: List[ClusterOps.GroupByMessage[String, String]] = List(
+      ClusterOps.Cluster(Set("a", "b", "c")),
+      ClusterOps.Data(Map("a" -> "broadcast1", "b" -> "broadcast1", "c" -> "broadcast1"))
+    )
+    val context = ClusterOps.StaggeredBroadcastContext[String, String, (String, String)](
+      client = (k: String) => Flow[String].map(v => k -> v),
+      sizeOf = _.length.toLong
+    )
+    val future = Source(input)
+      .via(ClusterOps.staggeredBroadcast(context))
+      .runWith(Sink.seq[(String, String)])
+    val seq = Await.result(future, Duration.Inf)
+
+    // All members should receive the broadcast
+    assertEquals(seq.filter(_._1 == "a").map(_._2).sorted, Seq("broadcast1"))
+    assertEquals(seq.filter(_._1 == "b").map(_._2).sorted, Seq("broadcast1"))
+    assertEquals(seq.filter(_._1 == "c").map(_._2).sorted, Seq("broadcast1"))
+  }
+
+  test("staggeredBroadcast: add and remove member") {
+    val input: List[ClusterOps.GroupByMessage[String, String]] = List(
+      ClusterOps.Cluster(Set("a")),
+      ClusterOps.Data(Map("a" -> "data1")),
+      ClusterOps.Cluster(Set("a", "b")),
+      ClusterOps.Data(Map("a" -> "data2", "b" -> "data2")),
+      ClusterOps.Cluster(Set("b")),
+      ClusterOps.Data(Map("b" -> "data3"))
+    )
+    val context = ClusterOps.StaggeredBroadcastContext[String, String, (String, String)](
+      client = (k: String) => Flow[String].map(v => k -> v),
+      sizeOf = _.length.toLong
+    )
+    val future = Source(input)
+      .via(ClusterOps.staggeredBroadcast(context))
+      .runWith(Sink.seq[(String, String)])
+    val seq = Await.result(future, Duration.Inf)
+
+    // Member "a" may not receive any data because completeAndClear is called
+    // when it is removed, and the drop-old queue may have already replaced data1
+    // with data2 before either could be consumed.
+    // Member "b" should receive data3 (last data for the surviving member)
+    assert(seq.filter(_._1 == "b").map(_._2).contains("data3"))
+  }
+
+  test("staggeredBroadcast: failed substream") {
+    val input: List[ClusterOps.GroupByMessage[String, String]] = List(
+      ClusterOps.Cluster(Set("a")),
+      ClusterOps.Data(Map("a" -> "data1")),
+      ClusterOps.Data(Map("a" -> "data2"))
+    )
+    val context = ClusterOps.StaggeredBroadcastContext[String, String, (String, String)](
+      client = (k: String) =>
+        Flow[String].map { v =>
+          // Fail on data1
+          if (v == "data1") throw new RuntimeException("test")
+          k -> v
+        },
+      sizeOf = _.length.toLong
+    )
+    val future = Source(input)
+      .via(ClusterOps.staggeredBroadcast(context))
+      .runWith(Sink.seq[(String, String)])
+    val seq = Await.result(future, Duration.Inf)
+
+    // Member "a" should recover after failure and receive data2
+    assert(seq.filter(_._1 == "a").map(_._2).contains("data2"))
+  }
 }

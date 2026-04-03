@@ -28,15 +28,15 @@ import org.apache.pekko.stream.stage.OutHandler
 import org.apache.pekko.util.ByteString
 import com.netflix.atlas.eval.model.LwcExpression
 import com.netflix.atlas.eval.model.LwcMessages
-import com.netflix.atlas.json.JsonSupport
+import com.netflix.atlas.json3.JsonSupport
 import com.netflix.atlas.pekko.DiagnosticMessage
 import com.typesafe.scalalogging.StrictLogging
 
 import scala.util.control.NonFatal
 
 /**
-  * Operator that register a WebSocket Stream, subscribe/update Expressions on demand as they
-  * flow in, and produce output message stream a single "Source".
+  * Operator that registers a WebSocket Stream, subscribes/updates Expressions on demand as they
+  * flow in, and produces an output message stream as a single "Source".
   */
 private[lwcapi] class WebSocketSessionManager(
   val streamMeta: StreamMetadata,
@@ -81,20 +81,18 @@ private[lwcapi] class WebSocketSessionManager(
           case NonFatal(t) =>
             highPriorityMessages = DiagnosticMessage.error(t) :: highPriorityMessages
         } finally {
-          // Push out dataSource only once
-          if (!dataSourcePushed) {
-            push(out, dataSource)
-            dataSourcePushed = true
-          } else {
-            // Only pull when no push happened, because push should have triggered a pull
-            // from downstream
-            onPull()
-          }
+          onPull()
         }
       }
 
       override def onPull(): Unit = {
-        if (highPriorityMessages.nonEmpty) {
+        if (!dataSourcePushed) {
+          // Push out the data source immediately so heartbeats start flowing
+          // before the client sends any subscription messages. This prevents
+          // idle timeouts when subscription delivery is delayed.
+          push(out, dataSource)
+          dataSourcePushed = true
+        } else if (highPriorityMessages.nonEmpty) {
           push(out, Source(highPriorityMessages))
           highPriorityMessages = Nil
         } else {

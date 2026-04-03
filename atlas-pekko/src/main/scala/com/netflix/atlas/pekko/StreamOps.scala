@@ -15,6 +15,8 @@
  */
 package com.netflix.atlas.pekko
 
+import com.netflix.iep.config.ConfigManager
+
 import java.util.concurrent.TimeUnit
 import org.apache.pekko.NotUsed
 import org.apache.pekko.stream.ActorAttributes
@@ -35,6 +37,7 @@ import org.apache.pekko.stream.stage.GraphStageLogic
 import org.apache.pekko.stream.stage.InHandler
 import org.apache.pekko.stream.stage.OutHandler
 import org.apache.pekko.stream.stage.TimerGraphStageLogic
+import org.apache.pekko.util.ByteString
 import com.netflix.spectator.api.Clock
 import com.netflix.spectator.api.Registry
 import com.typesafe.scalalogging.StrictLogging
@@ -220,6 +223,12 @@ object StreamOps extends StrictLogging {
       completed = true
     }
 
+    /** Complete the queue and clear any pending elements. */
+    def completeAndClear(): Unit = {
+      completed = true
+      queue.clear()
+    }
+
     /** Check if the queue is open to take more data. */
     def isOpen: Boolean = !completed
 
@@ -380,8 +389,97 @@ object StreamOps extends StrictLogging {
 
   private object MonitorFlow {
 
-    private val MeterBatchSize = 1_000_000
-    private val MeterUpdateInterval = TimeUnit.SECONDS.toNanos(1L)
+    val MeterBatchSize: Int = 1_000_000
+    val MeterUpdateInterval: Long = TimeUnit.SECONDS.toNanos(1L)
+  }
+
+  /**
+    * Buffer elements in the stream with a fixed size buffer. If the buffer is full when a
+    * new element arrives, the element will be dropped and a counter will be incremented.
+    * This is similar to `Flow.buffer(size, OverflowStrategy.dropNew)`, but tracks the
+    * number of dropped elements using a Spectator counter.
+    *
+    * @param registry
+    *     Spectator registry for managing the drop counter.
+    * @param id
+    *     Id for the counter that will be incremented when an element is dropped.
+    * @param size
+    *     Maximum number of elements to buffer.
+    * @return
+    *     Flow that buffers elements and drops new arrivals when full.
+    */
+  def buffer[T](registry: Registry, id: String, size: Int): Flow[T, T, NotUsed] = {
+    Flow[T].via(new BufferFlow[T](registry, id, size))
+  }
+
+  private final class BufferFlow[T](registry: Registry, id: String, size: Int)
+      extends GraphStage[FlowShape[T, T]] {
+
+    private val baseId = registry.createId("pekko.stream.bufferEvents", "id", id)
+    private val bufferedCounter = registry.counter(baseId.withTag("result", "buffered"))
+    private val droppedCounter = registry.counter(baseId.withTag("result", "dropped"))
+
+    private val in = Inlet[T]("BufferFlow.in")
+    private val out = Outlet[T]("BufferFlow.out")
+
+    override val shape: FlowShape[T, T] = FlowShape(in, out)
+
+    override def createLogic(inheritedAttributes: Attributes): TimerGraphStageLogic = {
+
+      new TimerGraphStageLogic(shape) with InHandler with OutHandler {
+
+        private val bufferedUpdater = bufferedCounter.batchUpdater(MonitorFlow.MeterBatchSize)
+        private val droppedUpdater = droppedCounter.batchUpdater(MonitorFlow.MeterBatchSize)
+
+        private val queue = new java.util.ArrayDeque[T](size)
+
+        override def preStart(): Unit = {
+          val frequency = FiniteDuration(MonitorFlow.MeterUpdateInterval, TimeUnit.NANOSECONDS)
+          scheduleWithFixedDelay(NotUsed, frequency, frequency)
+        }
+
+        override def onTimer(timerKey: Any): Unit = {
+          bufferedUpdater.flush()
+          droppedUpdater.flush()
+        }
+
+        override def onPush(): Unit = {
+          val elem = grab(in)
+          if (queue.size() < size) {
+            queue.offer(elem)
+            bufferedUpdater.increment()
+            if (isAvailable(out)) {
+              push(out, queue.poll())
+            }
+          } else {
+            droppedUpdater.increment()
+          }
+          pull(in)
+        }
+
+        override def onPull(): Unit = {
+          if (!queue.isEmpty) {
+            push(out, queue.poll())
+          }
+          if (!hasBeenPulled(in) && !isClosed(in)) {
+            pull(in)
+          }
+        }
+
+        override def onUpstreamFinish(): Unit = {
+          if (queue.isEmpty) {
+            completeStage()
+          } else {
+            emitMultiple(out, queue.iterator())
+            completeStage()
+          }
+          bufferedUpdater.close()
+          droppedUpdater.close()
+        }
+
+        setHandlers(in, out, this)
+      }
+    }
   }
 
   /**
@@ -528,6 +626,88 @@ object StreamOps extends StrictLogging {
         override def onPull(): Unit = {
           if (!hasBeenPulled(in))
             pull(in)
+        }
+
+        setHandlers(in, out, this)
+      }
+    }
+  }
+
+  /** Default max size for ByteStrings with collectBytes. */
+  private val MaxByteStringSize = {
+    ConfigManager.dynamicConfig().getBytes("atlas.pekko.max-bytestring-size")
+  }
+
+  /**
+    * Collects a stream of ByteStrings into a single ByteString with a size limit to prevent
+    * memory issues from extremely large messages. This is a safer alternative to using
+    * `fold(ByteString.empty)(_ ++ _)` which has no size limits.
+    *
+    * If the total size exceeds the limit, the stream will fail with an IllegalStateException.
+    * The maximum size is read from the config setting `atlas.pekko.max-bytestring-size`.
+    *
+    * @return
+    *     Flow that accumulates ByteStrings and emits a single combined ByteString when
+    *     the upstream completes.
+    */
+  def collectBytes: Flow[ByteString, ByteString, NotUsed] = {
+    collectBytes(MaxByteStringSize)
+  }
+
+  /**
+    * Collects a stream of ByteStrings into a single ByteString with a specified size limit
+    * to prevent memory issues from extremely large messages.
+    *
+    * If the total size exceeds the limit, the stream will fail with an IllegalStateException.
+    *
+    * @param maxSize
+    *     Maximum total size in bytes. If the accumulated ByteStrings exceed this size,
+    *     the stream will fail.
+    * @return
+    *     Flow that accumulates ByteStrings and emits a single combined ByteString when
+    *     the upstream completes.
+    */
+  def collectBytes(maxSize: Long): Flow[ByteString, ByteString, NotUsed] = {
+    require(maxSize > 0, "maxSize must be > 0")
+    Flow[ByteString].via(new CollectBytesFlow(maxSize))
+  }
+
+  private final class CollectBytesFlow(maxSize: Long)
+      extends GraphStage[FlowShape[ByteString, ByteString]] {
+
+    private val in = Inlet[ByteString]("CollectBytesFlow.in")
+    private val out = Outlet[ByteString]("CollectBytesFlow.out")
+
+    override val shape: FlowShape[ByteString, ByteString] = FlowShape(in, out)
+
+    override def createLogic(inheritedAttributes: Attributes): GraphStageLogic = {
+
+      new GraphStageLogic(shape) with InHandler with OutHandler {
+        private var accumulated = ByteString.empty
+        private var totalSize = 0L
+
+        override def onPush(): Unit = {
+          val chunk = grab(in)
+          val newSize = totalSize + chunk.size
+
+          if (newSize > maxSize) {
+            val msg = f"ByteString size limit exceeded: $newSize%,d bytes > $maxSize%,d bytes"
+            logger.warn(msg)
+            failStage(new IllegalStateException(msg))
+          } else {
+            accumulated = accumulated ++ chunk
+            totalSize = newSize
+            pull(in)
+          }
+        }
+
+        override def onPull(): Unit = {
+          pull(in)
+        }
+
+        override def onUpstreamFinish(): Unit = {
+          emit(out, accumulated)
+          completeStage()
         }
 
         setHandlers(in, out, this)

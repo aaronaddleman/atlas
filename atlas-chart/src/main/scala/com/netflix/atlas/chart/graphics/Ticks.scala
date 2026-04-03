@@ -53,6 +53,11 @@ object Ticks {
 
   // Major and minor tick sizes for time axis.
   private val timeTickSizes = List(
+    seconds(5)  -> seconds(1),
+    seconds(10) -> seconds(2),
+    seconds(15) -> seconds(5),
+    seconds(20) -> seconds(5),
+    seconds(30) -> seconds(10),
     minutes(1)  -> seconds(10),
     minutes(2)  -> seconds(30),
     minutes(3)  -> minutes(1),
@@ -136,16 +141,14 @@ object Ticks {
       List(1, 2, 3, 4, 6, 86400 * 365)
     )
 
-    var lastFactor = 0.0
     for (i <- 1 until UnitPrefix.durationBigPrefixes.size) {
       val nextPrefix = UnitPrefix.durationBigPrefixes.reverse(i)
       val n = 4
       val multiples = majorMultiples(i - 1)
       val subList = multiples.reverse.map { m =>
         val q = nextPrefix.factor / m
-        (lastFactor + q, q / n, n)
+        (q, q / n, n)
       }
-      lastFactor = nextPrefix.factor
       ticks = ticks ::: subList
     }
 
@@ -234,7 +237,7 @@ object Ticks {
 
   private def durationLabelFormat(prefix: UnitPrefix, v: Double): String = {
     val f = if (v < 1) v / prefix.factor else v
-    (f * 1000.0).toInt match {
+    Math.round(f * 1000.0) match {
       case _ if v >= 3.1536e10 => "%.1e%s" // 1000+ years switch to exponent
       case _ if v >= 60        => "%.0f%s"
       case i if (i % 10) > 0   => "%.3f%s" // 1.234

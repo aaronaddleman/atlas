@@ -19,13 +19,13 @@ import org.apache.pekko.http.scaladsl.model.HttpResponse
 import org.apache.pekko.http.scaladsl.model.StatusCodes
 import org.apache.pekko.http.scaladsl.server.Directives.*
 import org.apache.pekko.http.scaladsl.server.Route
-import com.netflix.atlas.json.Json
+import com.netflix.atlas.json3.Json
 import com.netflix.atlas.pekko.CustomDirectives.*
 import com.netflix.atlas.pekko.DiagnosticMessage
 import com.netflix.atlas.pekko.WebApi
 
 /**
-  * Provides a summary of the current streams. This is to aide in debugging and can be
+  * Provides a summary of the current streams. This is to aid in debugging and can be
   * disabled without impacting the service.
   */
 class StreamsApi(sm: StreamSubscriptionManager) extends WebApi {

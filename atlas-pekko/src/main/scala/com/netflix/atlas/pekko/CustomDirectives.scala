@@ -15,6 +15,15 @@
  */
 package com.netflix.atlas.pekko
 
+import java.io.StringWriter
+import java.util.concurrent.ThreadLocalRandom
+import scala.concurrent.ExecutionContext
+import scala.concurrent.Future
+import scala.util.Failure
+import com.netflix.atlas.json3.Json
+import com.netflix.spectator.ipc.NetflixHeader
+import org.apache.pekko.http.scaladsl.model.HttpCharsets
+import org.apache.pekko.http.scaladsl.model.HttpEntity
 import org.apache.pekko.http.scaladsl.model.HttpHeader
 import org.apache.pekko.http.scaladsl.model.HttpMethods
 import org.apache.pekko.http.scaladsl.model.HttpRequest
@@ -31,19 +40,12 @@ import org.apache.pekko.http.scaladsl.server.PathMatcher
 import org.apache.pekko.http.scaladsl.server.Route
 import org.apache.pekko.http.scaladsl.server.RouteResult
 import org.apache.pekko.http.scaladsl.server.directives.LoggingMagnet
+import org.apache.pekko.http.scaladsl.server.util.Tuple
 import org.apache.pekko.http.scaladsl.unmarshalling.FromRequestUnmarshaller
 import org.apache.pekko.stream.Materializer
 import org.apache.pekko.util.ByteString
-import com.fasterxml.jackson.core.JsonParser
-import com.fasterxml.jackson.module.scala.JavaTypeable
-import com.netflix.atlas.json.Json
-import com.netflix.spectator.ipc.NetflixHeader
-import org.apache.pekko.http.scaladsl.server.util.Tuple
-
-import java.util.concurrent.ThreadLocalRandom
-import scala.concurrent.ExecutionContext
-import scala.concurrent.Future
-import scala.util.Failure
+import tools.jackson.core.JsonParser
+import tools.jackson.module.scala.JavaTypeable
 import scala.util.Success
 
 object CustomDirectives {
@@ -218,6 +220,82 @@ object CustomDirectives {
     corsPreflight(hosts) ~ respondWithCorsHeaders(hosts) { inner }
   }
 
+  /**
+    * Returns a JSONP response. This directive will always try to return a 200 response so that the
+    * javascript code in the browser can better deal with errors. The actual response status code
+    * and headers will be included as part of the JSON object returned.
+    */
+  def jsonpFilter: Directive0 = {
+    import scala.language.postfixOps
+    parameter("callback" ?).flatMap {
+      case None => pass
+      case Some(callback) =>
+        mapResponse { res =>
+          val writer = new StringWriter
+          writer.write(callback)
+          writer.append('(')
+          val gen = Json.newJsonGenerator(writer)
+          gen.writeStartObject()
+          gen.writeNumberProperty("status", res.status.intValue)
+
+          // Write out list of headers, the content-type is part of the entity so the object is
+          // closed as the first part of the entity encoding
+          gen.writeObjectPropertyStart("headers")
+          res.headers.groupBy(_.lowercaseName).foreach {
+            case (n, hs) =>
+              gen.writeArrayPropertyStart(n)
+              hs.foreach { h =>
+                gen.writeString(h.value)
+              }
+              gen.writeEndArray()
+          }
+
+          // Write out the entity
+          res.entity match {
+            case entity: HttpEntity.Strict =>
+              // Complete headers object
+              val contentType = entity.contentType.mediaType
+              gen.writeArrayPropertyStart("content-type")
+              if (contentType.mainType == "none")
+                gen.writeString("text/plain")
+              else
+                gen.writeString(contentType.toString)
+              gen.writeEndArray()
+              gen.writeEndObject()
+
+              gen.writeName("body")
+
+              contentType match {
+                case MediaTypes.`application/json` =>
+                  gen.writeRawValue(entity.data.decodeString(ByteString.UTF_8))
+                case t if t.mainType == "text" =>
+                  gen.writeString(entity.data.decodeString(ByteString.UTF_8))
+                case _ => gen.writeBinary(entity.data.toArray)
+              }
+              gen.writeEndObject()
+            case _ =>
+              // Complete headers object
+              gen.writeArrayPropertyStart("content-type")
+              gen.writeString("text/plain")
+              gen.writeEndArray()
+              gen.writeEndObject()
+
+              // Empty, just write out an empty string. Not sure why it is this instead of null
+              // but keeping it this way for backwards compatibility.
+              gen.writeName("body")
+              gen.writeString("entity type not supported via JSONP, switch to CORS")
+              gen.writeEndObject()
+          }
+          gen.flush()
+          writer.append(')')
+
+          val jsType = MediaTypes.`application/javascript`.withCharset(HttpCharsets.`UTF-8`)
+          val entity = HttpEntity(jsType, writer.toString)
+          HttpResponse(status = StatusCodes.OK, entity = entity)
+        }
+    }
+  }
+
   // Helper function to finish constructing the log entry and writing to the logger.
   private def log(logger: AccessLogger)(req: HttpRequest)(result: RouteResult): Unit = {
     result match {
@@ -270,7 +348,7 @@ object CustomDirectives {
   }
 
   /**
-    * This is a convenience directive for the common pattern of have a fixed path with an
+    * This is a convenience directive for the common pattern of having a fixed path with an
     * extracted portion such as an identifier at the end. It will set the endpoint header based
     * on the prefix matcher. Example:
     *
