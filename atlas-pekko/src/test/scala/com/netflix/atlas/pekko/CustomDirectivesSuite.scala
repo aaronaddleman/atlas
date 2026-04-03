@@ -55,111 +55,111 @@ class CustomDirectivesSuite extends MUnitRouteSuite {
       accessLog(List(zone)) {
         respondWithCorsHeaders(List("*")) {
           path("text") {
-              get {
-                val entity = HttpEntity(ContentTypes.`text/plain(UTF-8)`, "text response")
+            get {
+              val entity = HttpEntity(ContentTypes.`text/plain(UTF-8)`, "text response")
+              complete(HttpResponse(status = StatusCodes.OK, entity = entity))
+            }
+          } ~
+          path("json") {
+            get {
+              val entity = HttpEntity(MediaTypes.`application/json`, "[1,2,3]")
+              complete(HttpResponse(status = StatusCodes.OK, entity = entity))
+            } ~
+            post {
+              parseEntity(CustomDirectives.json[Message]) { message =>
+                val entity = HttpEntity(MediaTypes.`application/json`, Json.encode(message))
                 complete(HttpResponse(status = StatusCodes.OK, entity = entity))
               }
             } ~
-            path("json") {
-              get {
-                val entity = HttpEntity(MediaTypes.`application/json`, "[1,2,3]")
-                complete(HttpResponse(status = StatusCodes.OK, entity = entity))
-              } ~
-              post {
-                parseEntity(CustomDirectives.json[Message]) { message =>
-                  val entity = HttpEntity(MediaTypes.`application/json`, Json.encode(message))
-                  complete(HttpResponse(status = StatusCodes.OK, entity = entity))
-                }
-              } ~
-              put {
-                entity(CustomDirectives.jsonUnmarshaller[Message]) { message =>
-                  val entity = HttpEntity(MediaTypes.`application/json`, Json.encode(message))
-                  complete(HttpResponse(status = StatusCodes.OK, entity = entity))
-                }
-              }
-            } ~
-            path("json-parser") {
-              post {
-                parseEntity(customJson(p => Json.decode[Message](p))) { message =>
-                  val entity = HttpEntity(MediaTypes.`application/json`, Json.encode(message))
-                  complete(HttpResponse(status = StatusCodes.OK, entity = entity))
-                }
-              }
-            } ~
-            path("binary") {
-              get {
-                val data = ByteString("text response")
-                val entity = HttpEntity.Strict(ContentTypes.`application/octet-stream`, data)
+            put {
+              entity(CustomDirectives.jsonUnmarshaller[Message]) { message =>
+                val entity = HttpEntity(MediaTypes.`application/json`, Json.encode(message))
                 complete(HttpResponse(status = StatusCodes.OK, entity = entity))
               }
-            } ~
-            path("error") {
-              get {
-                val entity = HttpEntity(ContentTypes.`text/plain(UTF-8)`, "error")
-                complete(HttpResponse(status = StatusCodes.BadRequest, entity = entity))
+            }
+          } ~
+          path("json-parser") {
+            post {
+              parseEntity(customJson(p => Json.decode[Message](p))) { message =>
+                val entity = HttpEntity(MediaTypes.`application/json`, Json.encode(message))
+                complete(HttpResponse(status = StatusCodes.OK, entity = entity))
               }
-            } ~
-            path("empty") {
-              get {
-                val headers = List(RawHeader("foo", "bar"))
-                complete(HttpResponse(status = StatusCodes.OK, headers = headers))
-              }
-            } ~
-            path("vary") {
-              get {
-                val headers = List(RawHeader("Vary", "Host"))
-                complete(HttpResponse(status = StatusCodes.OK, headers = headers))
-              }
-            } ~
-            path("error" / IntNumber) { code =>
-              get {
-                val status = StatusCodes.custom(code, "Error")
-                complete(HttpResponse(status = status))
-              }
-            } ~
-            endpointPath("endpoint") {
-              get {
-                complete(HttpResponse(status = StatusCodes.OK))
-              }
-            } ~
-            endpointPath("endpoint", IntNumber) { code =>
-              get {
-                val status = StatusCodes.custom(code, "Error")
-                complete(HttpResponse(status = status))
-              }
-            } ~
-            endpointPathPrefix("endpoint" / "v1") {
-              endpointPathPrefix("foo") {
-                pathPrefix(IntNumber) { _ =>
-                  endpointPath("bar", Remaining) { _ =>
-                    get {
-                      complete(HttpResponse(status = StatusCodes.OK))
-                    }
+            }
+          } ~
+          path("binary") {
+            get {
+              val data = ByteString("text response")
+              val entity = HttpEntity.Strict(ContentTypes.`application/octet-stream`, data)
+              complete(HttpResponse(status = StatusCodes.OK, entity = entity))
+            }
+          } ~
+          path("error") {
+            get {
+              val entity = HttpEntity(ContentTypes.`text/plain(UTF-8)`, "error")
+              complete(HttpResponse(status = StatusCodes.BadRequest, entity = entity))
+            }
+          } ~
+          path("empty") {
+            get {
+              val headers = List(RawHeader("foo", "bar"))
+              complete(HttpResponse(status = StatusCodes.OK, headers = headers))
+            }
+          } ~
+          path("vary") {
+            get {
+              val headers = List(RawHeader("Vary", "Host"))
+              complete(HttpResponse(status = StatusCodes.OK, headers = headers))
+            }
+          } ~
+          path("error" / IntNumber) { code =>
+            get {
+              val status = StatusCodes.custom(code, "Error")
+              complete(HttpResponse(status = status))
+            }
+          } ~
+          endpointPath("endpoint") {
+            get {
+              complete(HttpResponse(status = StatusCodes.OK))
+            }
+          } ~
+          endpointPath("endpoint", IntNumber) { code =>
+            get {
+              val status = StatusCodes.custom(code, "Error")
+              complete(HttpResponse(status = status))
+            }
+          } ~
+          endpointPathPrefix("endpoint" / "v1") {
+            endpointPathPrefix("foo") {
+              pathPrefix(IntNumber) { _ =>
+                endpointPath("bar", Remaining) { _ =>
+                  get {
+                    complete(HttpResponse(status = StatusCodes.OK))
                   }
                 }
               }
-            } ~
-            closeConnection(0.0) {
-              path("close" / "0.0") {
-                get {
-                  complete(HttpResponse(status = StatusCodes.OK))
-                }
-              }
-            } ~
-            closeConnection(0.5) {
-              path("close" / "0.5") {
-                get {
-                  complete(HttpResponse(status = StatusCodes.OK))
-                }
-              }
-            } ~
-            closeConnection(1.0) {
-              path("close" / "1.0") {
-                get {
-                  complete(HttpResponse(status = StatusCodes.OK))
-                }
+            }
+          } ~
+          closeConnection(0.0) {
+            path("close" / "0.0") {
+              get {
+                complete(HttpResponse(status = StatusCodes.OK))
               }
             }
+          } ~
+          closeConnection(0.5) {
+            path("close" / "0.5") {
+              get {
+                complete(HttpResponse(status = StatusCodes.OK))
+              }
+            }
+          } ~
+          closeConnection(1.0) {
+            path("close" / "1.0") {
+              get {
+                complete(HttpResponse(status = StatusCodes.OK))
+              }
+            }
+          }
         } ~
         corsPreflight(Nil)
       }
