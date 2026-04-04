@@ -25,8 +25,12 @@ import com.netflix.atlas.core.util.Strings
   * @param vocabulary
   *     Set of supported words. If multiple words have the same name, then the first one that matches
   *     with the current stack will get used.
+  * @param maxStackSize
+  *     Maximum number of items allowed on the stack. This is used to prevent expressions that
+  *     can cause exponential stack growth using operations like `:each` and `:fcall`. The
+  *     default of 1024 should be more than enough for legitimate use-cases.
   */
-case class Interpreter(vocabulary: List[Word]) {
+case class Interpreter(vocabulary: List[Word], maxStackSize: Int = 1024) {
 
   import com.netflix.atlas.core.stacklang.Interpreter.*
 
@@ -73,17 +77,27 @@ case class Interpreter(vocabulary: List[Word]) {
     * the list will not get executed.
     */
   @scala.annotation.tailrec
-  private def popAndPushList(depth: Int, acc: List[Any], step: Step): Step = {
+  private def popAndPushList(
+    depth: Int,
+    acc: List[Any],
+    accSize: Int,
+    step: Step
+  ): Step = {
+    if (accSize > maxStackSize) {
+      throw new IllegalStateException(
+        s"stack overflow: list size exceeds limit of $maxStackSize"
+      )
+    }
     step.program match {
       case "(" :: tokens =>
-        popAndPushList(depth + 1, "(" :: acc, step.copy(program = tokens))
+        popAndPushList(depth + 1, "(" :: acc, accSize + 1, step.copy(program = tokens))
       case ")" :: tokens if depth == 0 =>
         val context = step.context
         Step(tokens, context.copy(stack = acc.reverse :: context.stack))
       case ")" :: tokens if depth > 0 =>
-        popAndPushList(depth - 1, ")" :: acc, step.copy(program = tokens))
+        popAndPushList(depth - 1, ")" :: acc, accSize + 1, step.copy(program = tokens))
       case t :: tokens =>
-        popAndPushList(depth, t :: acc, step.copy(program = tokens))
+        popAndPushList(depth, t :: acc, accSize + 1, step.copy(program = tokens))
       case Nil =>
         throw new IllegalStateException("unmatched opening parenthesis")
     }
@@ -94,7 +108,7 @@ case class Interpreter(vocabulary: List[Word]) {
     s.program match {
       case token :: tokens =>
         token match {
-          case "("       => popAndPushList(0, Nil, Step(tokens, context))
+          case "("       => popAndPushList(0, Nil, 0, Step(tokens, context))
           case ")"       => throw new IllegalStateException("unmatched closing parenthesis")
           case IsWord(t) => Step(tokens, executeWord(t, context))
           case t         => Step(tokens, context.copy(stack = unescape(t) :: context.stack))
@@ -111,6 +125,11 @@ case class Interpreter(vocabulary: List[Word]) {
       // should be more than enough for legitimate use-cases. Testing 1M actual expressions, 3
       // was the highest depth seen.
       throw new IllegalStateException(s"looping detected")
+    }
+    if (s.context.stackSize > maxStackSize) {
+      throw new IllegalStateException(
+        s"stack overflow: stack size exceeds limit of $maxStackSize"
+      )
     }
     if (s.program.isEmpty) s.context else execute(nextStep(s))
   }
