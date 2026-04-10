@@ -302,7 +302,7 @@ object SortedTagMap {
   def apply(data: IterableOnce[(String, String)]): SortedTagMap = {
     data match {
       case m: SortedTagMap => m
-      case m: Map[String, String] =>
+      case m: Map[String, String] @unchecked =>
         builder(m.size).addAll(m).result()
       case _ =>
         val size = data.knownSize

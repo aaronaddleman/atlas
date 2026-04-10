@@ -3,7 +3,7 @@ addSbtPlugin("com.github.sbt"            % "sbt-release"          % "1.4.0")
 addSbtPlugin("pl.project13.scala"        % "sbt-jmh"              % "0.4.7")
 addSbtPlugin("com.github.sbt"            % "sbt-git"              % "2.1.0")
 
-addSbtPlugin("org.scalameta"             % "sbt-scalafmt"         % "2.4.6")
+addSbtPlugin("org.scalameta"             % "sbt-scalafmt"         % "2.5.4")
 
 // Convenient helpers, not required
 addSbtPlugin("com.timushev.sbt"          % "sbt-updates"          % "0.6.4")

@@ -144,7 +144,7 @@ object LwcMessages {
 
   private def nextTree(parser: JsonParser): JsonNode = {
     parser.nextToken()
-    mapper.readTree[JsonNode](parser)
+    mapper.readTree(parser)
   }
 
   private[model] def parseDataExprs(parser: JsonParser): List[LwcDataExpr] = {
@@ -172,7 +172,7 @@ object LwcMessages {
       val row = List.newBuilder[Any]
       var t = parser.nextToken()
       while (t != null && t != JsonToken.END_ARRAY) {
-        row += mapper.readTree[JsonNode](parser)
+        row += mapper.readTree(parser)
         t = parser.nextToken()
       }
       samples += row.result()
