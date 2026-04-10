@@ -369,7 +369,7 @@ object JsonCodec {
     val heatmaps = Map.newBuilder[Int, HeatmapDef]
     val data = List.newBuilder[(Int, DataDef)]
     foreachItem(parser) {
-      val node = mapper.readTree[JsonNode](parser)
+      val node = mapper.readTree(parser)
       node.get("type").asString() match {
         case "graph-image" =>
         // ignored for right now
