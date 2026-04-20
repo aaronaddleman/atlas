@@ -129,7 +129,32 @@ class InterpreterSuite extends FunSuite {
       Interpreter.Step(list.drop(3), createContext(List(List("1")))),
       Interpreter.Step(Nil, createContext(List(List("2"), List("1"))))
     )
-    assertEquals(interpreter.debug(list), expected)
+    assertEquals(interpreter.debug(list).toList, expected)
+  }
+
+  test("debug returns an iterator that evaluates steps lazily") {
+    val list = List("(", "1", ")", "(", "2", ")")
+    val result: Iterator[Interpreter.Step] = interpreter.debug(list)
+    // debug() should return an Iterator, not a List, so that steps are
+    // evaluated one at a time rather than all being held in memory.
+    // Consuming via next()/hasNext proves lazy step-by-step evaluation.
+    assert(result.hasNext)
+    val first = result.next()
+    assertEquals(first.program, list)
+    assert(result.hasNext)
+    val second = result.next()
+    assertEquals(second.program, list.drop(3))
+    assert(result.hasNext)
+    val third = result.next()
+    assertEquals(third.program, List.empty[Any])
+    assert(!result.hasNext)
+  }
+
+  //  (,:depth,:nlist,(,:dup,),:each,),f,:sset,1$(printf ',f,:fcall%.0s' $(seq 443))
+  test("debug returns an iterator that has 5 chunks") {
+    val list = List("(", ":depth", ":nlist", ")", "(", ":dup", ")", "f")
+    val result: Iterator[Interpreter.Step] = interpreter.debug(list)
+    assert(result.hasNext)
   }
 
   test("toString") {

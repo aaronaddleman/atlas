@@ -155,25 +155,40 @@ case class Interpreter(vocabulary: List[Word], maxStackSize: Int = 1024) {
     executeProgram(splitAndTrim(program), Context(this, Nil, vars, vars, features = features))
   }
 
-  @scala.annotation.tailrec
-  private def debugImpl(steps: List[Step], s: Step): List[Step] = {
-    val trace = s :: steps
-    if (s.program.isEmpty) trace else debugImpl(trace, nextStep(s))
-  }
+  /**
+    * Returns an iterator over the execution steps for `program`. Steps are
+    * produced lazily one at a time so the caller can stream through a long
+    * program without materializing every intermediate stack in memory. The
+    * final step's context is returned with `unfreeze` applied so downstream
+    * consumers see the merged result stack, matching the prior behavior of
+    * the List-returning version.
+    */
+  final def debug(program: List[Any], context: Context): Iterator[Step] = {
+    new Iterator[Step] {
+      private var current: Step = Step(program, context)
+      private var finished: Boolean = false
 
-  final def debug(program: List[Any], context: Context): List[Step] = {
-    val result = debugImpl(Nil, Step(program, context)) match {
-      case s :: steps => s.copy(context = s.context.unfreeze) :: steps
-      case Nil        => Nil
+      override def hasNext: Boolean = !finished
+
+      override def next(): Step = {
+        if (finished) throw new NoSuchElementException("debug iterator exhausted")
+        val step = current
+        if (step.program.isEmpty) {
+          finished = true
+          step.copy(context = step.context.unfreeze)
+        } else {
+          current = nextStep(step)
+          step
+        }
+      }
     }
-    result.reverse
   }
 
-  final def debug(program: List[Any]): List[Step] = {
+  final def debug(program: List[Any]): Iterator[Step] = {
     debug(program, Context(this, Nil, Map.empty, features = Features.UNSTABLE))
   }
 
-  final def debug(program: String): List[Step] = {
+  final def debug(program: String): Iterator[Step] = {
     debug(splitAndTrim(program))
   }
 

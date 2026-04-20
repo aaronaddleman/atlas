@@ -15,10 +15,15 @@
  */
 package com.netflix.atlas.webapi
 
+import java.nio.charset.StandardCharsets
+import java.util.Base64
+
 import org.apache.pekko.http.scaladsl.model.HttpEntity
+import org.apache.pekko.http.scaladsl.model.HttpHeader
 import org.apache.pekko.http.scaladsl.model.HttpResponse
 import org.apache.pekko.http.scaladsl.model.MediaTypes
 import org.apache.pekko.http.scaladsl.model.StatusCodes
+import org.apache.pekko.http.scaladsl.model.headers.RawHeader
 import org.apache.pekko.http.scaladsl.server.Directives.*
 import org.apache.pekko.http.scaladsl.server.Route
 import com.netflix.atlas.core.model.Expr
@@ -136,7 +141,12 @@ class ExprApi extends WebApi {
 
   private def processDebugRequest(query: String, vocabName: String): HttpResponse = {
     val interpreter = newInterpreter(vocabName)
-    val execSteps = interpreter.debug(query)
+    val plan = ChunkPlanner.plan(query, ApiSettings.debugMaxChunksPerQuery)
+    // `debug` now returns an Iterator[Step] to bound per-step memory in the
+    // interpreter. The API still emits the full list in the JSON body, so we
+    // materialize here. Streaming the JSON response is a follow-up; that's
+    // what completes the memory fix end-to-end.
+    val execSteps = interpreter.debug(query).toList
     if (execSteps.nonEmpty) {
       verifyStackContents(vocabName, execSteps.last.context.stack)
     }
@@ -147,7 +157,7 @@ class ExprApi extends WebApi {
       val ctxt = Map("stack" -> stack, "variables" -> vars)
       Map("program" -> step.program, "context" -> ctxt)
     }
-    jsonResponse(steps)
+    jsonResponse(steps, ExprApi.chunkPlanHeaders(plan))
   }
 
   private def processNormalizeRequest(query: String, vocabName: String): HttpResponse = {
@@ -272,15 +282,52 @@ class ExprApi extends WebApi {
 
   /** Encode `obj` as json and create the HttpResponse. */
   private def jsonResponse(obj: AnyRef): HttpResponse = {
+    jsonResponse(obj, Nil)
+  }
+
+  private def jsonResponse(obj: AnyRef, headers: List[HttpHeader]): HttpResponse = {
     val data = Json.encode(obj)
     val entity = HttpEntity(MediaTypes.`application/json`, data)
-    HttpResponse(StatusCodes.OK, entity = entity)
+    HttpResponse(StatusCodes.OK, headers, entity)
   }
 }
 
 object ExprApi {
 
   private val normalizer = new ExprNormalizer(ApiSettings.normalizeConfig)
+
+  /** Header names for the chunk planner metadata. See ChunkPlanner for protocol. */
+  val QuerySignatureHeader = "X-Atlas-Query-Signature"
+  val ChunkTotalHeader = "X-Atlas-Chunk-Total"
+  val ChunkPlanHeader = "X-Atlas-Chunk-Plan"
+
+  /**
+    * Build the response headers that describe the chunk plan for a debug
+    * request. Always emits the query signature and chunk total. The plan
+    * header (base64-encoded JSON) is omitted when the query produces no
+    * chunks, to keep empty responses clean.
+    */
+  private[webapi] def chunkPlanHeaders(plan: ChunkPlanner.Plan): List[HttpHeader] = {
+    val base = List(
+      RawHeader(QuerySignatureHeader, plan.signature),
+      RawHeader(ChunkTotalHeader, plan.chunks.size.toString)
+    )
+    if (plan.chunks.isEmpty) base
+    else {
+      val planJson = plan.chunks.map { c =>
+        Map(
+          "index"       -> c.index,
+          "start"       -> c.start,
+          "end"         -> c.end,
+          "splitBefore" -> c.splitBefore.orNull
+        )
+      }
+      val encoded = Base64.getEncoder.encodeToString(
+        Json.encode(planJson).getBytes(StandardCharsets.UTF_8)
+      )
+      base :+ RawHeader(ChunkPlanHeader, encoded)
+    }
+  }
 
   /**
     * Normalizes an Atlas expression program into a canonical string representation.
