@@ -26,10 +26,12 @@ import com.netflix.atlas.core.stacklang.ast.IsNumber
 import com.netflix.atlas.core.stacklang.Context
 import com.netflix.atlas.core.stacklang.Interpreter
 import com.netflix.atlas.core.util.ArrayHelper
+import com.netflix.atlas.core.util.Features
 import com.netflix.atlas.core.util.Hash
 import com.netflix.atlas.core.util.Math
 import com.netflix.atlas.core.util.Strings
 import com.netflix.spectator.api.histogram.PercentileBuckets
+import com.netflix.spectator.api.patterns.DistinctCountSketch
 
 import scala.collection.immutable.ArraySeq
 
@@ -326,7 +328,7 @@ object MathExpr {
       ResultSet(
         this,
         rs.data.map { t =>
-          t.unaryOp(s"$name(%s, $min)", this)
+          t.unaryOp(this)
         },
         rs.state
       )
@@ -358,7 +360,7 @@ object MathExpr {
       ResultSet(
         this,
         rs.data.map { t =>
-          t.unaryOp(s"$name(%s, $max)", this)
+          t.unaryOp(this)
         },
         rs.state
       )
@@ -397,7 +399,7 @@ object MathExpr {
       ResultSet(
         this,
         rs.data.map { t =>
-          t.unaryOp(s"$name(%s)", this)
+          t.unaryOp(this)
         },
         rs.state
       )
@@ -445,7 +447,7 @@ object MathExpr {
         // Assumes rate-per-second counter. If the step size is less than a second, then it
         // will be a fractional multiple and reduce the amount.
         val multiple = t.data.step / 1000.0
-        t.unaryOp(s"$name(%s)", v => v * multiple)
+        t.unaryOp(v => v * multiple)
       }
       ResultSet(this, newData, rs.state)
     }
@@ -488,8 +490,6 @@ object MathExpr {
 
     def name: String
 
-    def labelFmt: String
-
     def expr1: TimeSeriesExpr
 
     def expr2: TimeSeriesExpr
@@ -527,16 +527,36 @@ object MathExpr {
       ResultSet(this, result, rs1.state ++ rs2.state)
     }
 
+    /**
+      * Index the series by their group by key for the join with the other side. A
+      * `java.util.HashMap` is used because the map does not escape this object and is only
+      * probed with `get`: it returns `null` for a missing key rather than allocating an
+      * `Option`, and it avoids building the intermediate immutable map (with `Option` keys)
+      * that `groupBy` would. That intermediate map was a large source of allocations for
+      * binary operations on grouped expressions. A null key (missing grouping tag) is
+      * permitted by `java.util.HashMap`.
+      */
+    private def indexByKey(
+      expr: TimeSeriesExpr,
+      data: List[TimeSeries]
+    ): java.util.HashMap[String, List[TimeSeries]] = {
+      val index = new java.util.HashMap[String, List[TimeSeries]]()
+      data.foreach { t =>
+        val k = expr.groupByKey(t.tags).orNull
+        index.put(k, t :: index.getOrDefault(k, Nil))
+      }
+      index
+    }
+
     /** LHS grouping keys are subset of the RHS grouping keys. */
     private def lhsSubset(rs1: ResultSet, rs2: ResultSet): List[TimeSeries] = {
-      val groupByKeyF = expr1.groupByKey _
-      val g1 = rs1.data.groupBy(t => groupByKeyF(t.tags))
+      val g1 = indexByKey(expr1, rs1.data)
       rs2.data.flatMap { t2 =>
-        val k = groupByKeyF(t2.tags)
-        g1.get(k).map {
+        g1.get(expr1.groupByKey(t2.tags).orNull) match {
+          case null => Nil
           // Normally tags are kept for the lhs, in this case we want to prefer the tags from
           // the grouped expr on the rhs
-          case t1 :: Nil => t1.binaryOp(t2, labelFmt, this).withTags(t2.tags)
+          case t1 :: Nil => List(t1.binaryOp(t2, this).withTags(t2.tags))
           case _         => throw new IllegalStateException("too many values for key")
         }
       }
@@ -544,12 +564,11 @@ object MathExpr {
 
     /** RHS grouping keys are subset of the LHS grouping keys. */
     private def rhsSubset(rs1: ResultSet, rs2: ResultSet): List[TimeSeries] = {
-      val groupByKeyF = expr2.groupByKey _
-      val g2 = rs2.data.groupBy(t => groupByKeyF(t.tags))
+      val g2 = indexByKey(expr2, rs2.data)
       rs1.data.flatMap { t1 =>
-        val k = groupByKeyF(t1.tags)
-        g2.get(k).map {
-          case t2 :: Nil => t1.binaryOp(t2, labelFmt, this)
+        g2.get(expr2.groupByKey(t1.tags).orNull) match {
+          case null      => Nil
+          case t2 :: Nil => List(t1.binaryOp(t2, this))
           case _         => throw new IllegalStateException("too many values for key")
         }
       }
@@ -560,16 +579,12 @@ object MathExpr {
 
     def name: String = "add"
 
-    def labelFmt: String = "(%s + %s)"
-
     def apply(v1: Double, v2: Double): Double = Math.addNaN(v1, v2)
   }
 
   case class Subtract(expr1: TimeSeriesExpr, expr2: TimeSeriesExpr) extends BinaryMathExpr {
 
     def name: String = "sub"
-
-    def labelFmt: String = "(%s - %s)"
 
     def apply(v1: Double, v2: Double): Double = Math.subtractNaN(v1, v2)
   }
@@ -578,16 +593,12 @@ object MathExpr {
 
     def name: String = "mul"
 
-    def labelFmt: String = "(%s * %s)"
-
     def apply(v1: Double, v2: Double): Double = v1 * v2
   }
 
   case class Divide(expr1: TimeSeriesExpr, expr2: TimeSeriesExpr) extends BinaryMathExpr {
 
     def name: String = "div"
-
-    def labelFmt: String = "(%s / %s)"
 
     def apply(v1: Double, v2: Double): Double = {
       if (v2 == 0.0) {
@@ -614,8 +625,6 @@ object MathExpr {
 
     def name: String = "pow"
 
-    def labelFmt: String = "pow(%s, %s)"
-
     def apply(v1: Double, v2: Double): Double = {
       // we just use the behavior of math.pow, so expressions like math.pow(0, 0)
       // or math.pow(Double.PositiveInfinity, 0) will return 1, not NaN (or an arithmetic exception)
@@ -629,16 +638,12 @@ object MathExpr {
 
     def name: String = "gt"
 
-    def labelFmt: String = "(%s > %s)"
-
     def apply(v1: Double, v2: Double): Double = if (v1 > v2) 1.0 else 0.0
   }
 
   case class GreaterThanEqual(expr1: TimeSeriesExpr, expr2: TimeSeriesExpr) extends BinaryMathExpr {
 
     def name: String = "ge"
-
-    def labelFmt: String = "(%s >= %s)"
 
     def apply(v1: Double, v2: Double): Double = if (v1 >= v2) 1.0 else 0.0
   }
@@ -647,16 +652,12 @@ object MathExpr {
 
     def name: String = "lt"
 
-    def labelFmt: String = "(%s < %s)"
-
     def apply(v1: Double, v2: Double): Double = if (v1 < v2) 1.0 else 0.0
   }
 
   case class LessThanEqual(expr1: TimeSeriesExpr, expr2: TimeSeriesExpr) extends BinaryMathExpr {
 
     def name: String = "le"
-
-    def labelFmt: String = "(%s <= %s)"
 
     def apply(v1: Double, v2: Double): Double = if (v1 <= v2) 1.0 else 0.0
   }
@@ -665,16 +666,12 @@ object MathExpr {
 
     def name: String = "fadd"
 
-    def labelFmt: String = "(%s + %s)"
-
     def apply(v1: Double, v2: Double): Double = v1 + v2
   }
 
   case class FSubtract(expr1: TimeSeriesExpr, expr2: TimeSeriesExpr) extends BinaryMathExpr {
 
     def name: String = "fsub"
-
-    def labelFmt: String = "(%s - %s)"
 
     def apply(v1: Double, v2: Double): Double = v1 - v2
   }
@@ -683,8 +680,6 @@ object MathExpr {
 
     def name: String = "fmul"
 
-    def labelFmt: String = "(%s * %s)"
-
     def apply(v1: Double, v2: Double): Double = v1 * v2
   }
 
@@ -692,16 +687,12 @@ object MathExpr {
 
     def name: String = "fdiv"
 
-    def labelFmt: String = "(%s / %s)"
-
     def apply(v1: Double, v2: Double): Double = v1 / v2
   }
 
   case class And(expr1: TimeSeriesExpr, expr2: TimeSeriesExpr) extends BinaryMathExpr {
 
     def name: String = "and"
-
-    def labelFmt: String = "(%s AND %s)"
 
     def apply(v1: Double, v2: Double): Double = {
       if (Math.toBoolean(v1) && Math.toBoolean(v2)) 1.0 else 0.0
@@ -711,8 +702,6 @@ object MathExpr {
   case class Or(expr1: TimeSeriesExpr, expr2: TimeSeriesExpr) extends BinaryMathExpr {
 
     def name: String = "or"
-
-    def labelFmt: String = "(%s OR %s)"
 
     def apply(v1: Double, v2: Double): Double = {
       if (Math.toBoolean(v1) || Math.toBoolean(v2)) 1.0 else 0.0
@@ -855,7 +844,7 @@ object MathExpr {
       val newData = sorted.flatMap {
         case (null, _) => Nil
         case (_, Nil)  => List(TimeSeries.noData(context.step))
-        case (k, ts) =>
+        case (k, ts)   =>
           val tags = ts.head.tags.filter(e => ks.contains(e._1))
           val aggr = expr.aggregator(context.start, context.end)
           ts.foreach(aggr.update)
@@ -1038,6 +1027,161 @@ object MathExpr {
   }
 
   /**
+    * Estimate the number of distinct values recorded into a distinct count sketch. The data
+    * must have been published as a set of per-register max-gauges tagged with
+    * `statistic=distinct` and a `distinct=R##` register id, for example via the
+    * `DistinctCountSketch` helper in spectator. Each register holds the max rho seen for that
+    * register and merges across sources by taking the max. The estimator reshapes `expr` to
+    * group on the `distinct` register key with a `:max` aggregate (see `registerExpr`), then
+    * collapses the registers to a single cardinality estimate using the same HyperLogLog
+    * estimator as the client.
+    *
+    * The estimate is computed independently for each interval. Any surviving group by keys
+    * (everything other than `distinct`) are preserved on the output.
+    *
+    * The register grouping is derived internally, so `expr` is the input as provided (not the
+    * register-grouped form): typically an aggregate or group by, optionally wrapped (for example
+    * by [[StatefulExpr.CumulativeMax]] to max the registers across time before the estimate). It
+    * is kept as-is so the operator renders as `<expr>,:approx-distinct` and round trips.
+    *
+    * @param expr
+    *     Input expression to estimate the distinct count over. Typically an aggregate or group
+    *     by, optionally wrapped (for example by `:cumulative-max`). It is kept as provided so the
+    *     operator renders as `<expr>,:approx-distinct` and round trips regardless of what
+    *     produced it; the register grouping is derived internally for evaluation.
+    */
+  case class ApproxDistinct(expr: TimeSeriesExpr) extends TimeSeriesExpr {
+
+    // Registers merge across sources (and time) by taking the max, so the data expressions are
+    // reshaped to group by the register key with a max aggregate. The reshape is applied through
+    // any wrappers (e.g. :cumulative-max) so the running max is applied per register. This
+    // reshaped form is what gets evaluated and fetched; `expr` itself is left untouched for
+    // rendering.
+    private val registerExpr: TimeSeriesExpr = expr
+      .rewrite {
+        case gb: DataExpr.GroupBy  => DataExpr.GroupBy(toMax(gb.af), TagKey.distinct :: gb.keys)
+        case af: AggregateFunction => DataExpr.GroupBy(toMax(af), List(TagKey.distinct))
+      }
+      .asInstanceOf[TimeSeriesExpr]
+
+    require(
+      registerExpr.finalGrouping.contains(TagKey.distinct),
+      s"input must have an aggregate that can be grouped by '${TagKey.distinct}'"
+    )
+
+    private def toMax(af: AggregateFunction): DataExpr.Max =
+      DataExpr.Max(af.query, offset = af.offset)
+
+    private val evalGroupKeys = registerExpr.finalGrouping.filter(_ != TagKey.distinct)
+
+    override def append(builder: java.lang.StringBuilder): Unit = {
+      Interpreter.append(builder, expr, Interpreter.WordToken(":approx-distinct"))
+    }
+
+    override val dataExprs: List[DataExpr] = registerExpr.dataExprs
+
+    override def isGrouped: Boolean = evalGroupKeys.nonEmpty
+
+    override def groupByKey(tags: Map[String, String]): Option[String] = {
+      // Option(...) rather than Some(...): keyString returns null when a group key is missing
+      // from the tags, matching DataExpr.GroupBy.groupByKey and the other grouped expressions.
+      if (evalGroupKeys.isEmpty) None else Option(DataExpr.keyString(evalGroupKeys, tags))
+    }
+
+    def finalGrouping: List[String] = evalGroupKeys
+
+    override def eval(context: EvalContext, data: Map[DataExpr, List[TimeSeries]]): ResultSet = {
+      val inner = registerExpr.eval(context, data)
+      if (inner.data.isEmpty) {
+        inner
+      } else if (evalGroupKeys.isEmpty) {
+        val label = s"approx-distinct(${dataExprs.head.query.labelString})"
+        ResultSet(this, estimateDistinct(context, label, inner.data), context.state)
+      } else {
+        val groups = inner.data.groupBy(_.tags - TagKey.distinct)
+        val rs = groups.values.toList.flatMap { ts =>
+          if (ts.isEmpty) ts
+          else {
+            val tags = ts.head.tags - TagKey.distinct
+            // Grouped output is one line per group, so the group key string is the natural
+            // label, matching a normal grouped aggregate.
+            val label = DataExpr.keyString(evalGroupKeys, tags)
+            estimateDistinct(context, label, ts)
+          }
+        }
+        ResultSet(this, rs, context.state)
+      }
+    }
+
+    private def estimateDistinct(
+      context: EvalContext,
+      label: String,
+      data: List[TimeSeries]
+    ): List[TimeSeries] = {
+
+      // As with percentiles, a "no data" placeholder series without the register tag can be
+      // present. Filter them out so the estimate can still be computed from the real data.
+      val filtered = data.filter(_.tags.contains(TagKey.distinct))
+      if (filtered.isEmpty) {
+        List(TimeSeries.noData(context.step))
+      } else {
+        val length = ((context.end - context.start) / context.step).toInt
+        val m = DistinctCountSketch.REGISTERS
+
+        // Output sequence for the collapsed cardinality estimate
+        val buf = ArrayHelper.fill(length, Double.NaN)
+        val output = new ArrayTimeSeq(DsType.Gauge, context.start, context.step, buf)
+
+        // Map each input series to its register index. The value stored in a register is the
+        // max rho; missing or NaN registers are treated as unset (0), matching the client. Only
+        // in-range registers are kept so the per-interval loop below needs no bounds check; an
+        // out-of-range id (e.g. from a client/backend register-count mismatch) is dropped.
+        val byRegister = filtered
+          .groupBy(t => Integer.parseInt(t.tags(TagKey.distinct).substring(1), 16))
+          .filter { case (idx, _) => idx >= 0 && idx < m }
+        val usedRegisters = byRegister.keys.toArray
+        java.util.Arrays.sort(usedRegisters)
+
+        val bounded = new Array[ArrayTimeSeq](usedRegisters.length)
+        var i = 0
+        while (i < usedRegisters.length) {
+          val vs = byRegister(usedRegisters(i))
+          require(
+            vs.lengthCompare(1) == 0,
+            s"invalid distinct encoding: [${vs.map(_.tags(TagKey.distinct)).mkString(",")}]"
+          )
+          bounded(i) = vs.head.data.bounded(context.start, context.end)
+          i += 1
+        }
+
+        // Register array reused across intervals. Used registers are (re)assigned each interval
+        // so the reset is folded into the assignment; registers with no series stay 0. If no
+        // register has data for an interval the sketch is absent, so the estimate is left as NaN
+        // (no data) rather than reporting a spurious 0 distinct values.
+        val registers = new Array[Double](m)
+        i = 0
+        while (i < length) {
+          var anySet = false
+          var j = 0
+          while (j < usedRegisters.length) {
+            val v = bounded(j).data(i)
+            val rho = if (v.isFinite && v > 0.0) v else 0.0
+            registers(usedRegisters(j)) = rho
+            if (rho > 0.0) anySet = true
+            j += 1
+          }
+          if (anySet)
+            output.data(i) = DistinctCountSketch.cardinality(registers)
+          i += 1
+        }
+
+        val tags = data.head.tags - TagKey.distinct
+        List(TimeSeries(tags, label, output))
+      }
+    }
+  }
+
+  /**
     * Named rewrites are used to keep track of the user intent for operations and
     * macros that are defined in terms of other basic operations. For example, `:avg`
     * is not available as a basic aggregate type, it is a rewrite to
@@ -1087,7 +1231,9 @@ object MathExpr {
 
           val grouping = evalExpr.finalGrouping
           if (grouping.nonEmpty) {
-            builder.append(grouping.mkString(",(,", ",", ",),:by"))
+            builder.append(",(,")
+            Interpreter.append(builder, grouping*)
+            builder.append(",),:by")
           }
         case t: TimeSeriesExpr if groupingMatches =>
           // The passed in expression maybe the result of a rewrite to the display expression
@@ -1141,7 +1287,12 @@ object MathExpr {
         super.rewrite(f)
       } else {
         val newDisplayExpr = displayExpr.rewrite(f)
-        val ctxt = context.interpreter.execute(toString(newDisplayExpr))
+        // Re-materialize the rewrite from its display string. This is reconstructing an
+        // expression that was already accepted, so it must not re-enforce the stability gate;
+        // otherwise rewrites such as normalization or `:cq` would fail for a named rewrite built
+        // from an operator gated behind the unstable features flag.
+        val ctxt =
+          context.interpreter.execute(toString(newDisplayExpr), Map.empty, Features.UNSTABLE)
         ctxt.stack match {
           case (r: NamedRewrite) :: Nil => r
           case _ => throw new IllegalStateException(s"invalid stack for :$name")

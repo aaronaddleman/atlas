@@ -8,23 +8,23 @@ jobs:
     strategy:
       matrix:
         java: [17, 25]
-        scala: [2.13.18, 3.8.3]
+        scala: [2.13.18, 3.8.4]
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Set up JDK ${{ matrix.java }}
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@v5.6.0
         with:
           java-version: ${{ matrix.java }}
           distribution: 'zulu'
           cache: 'sbt'
       - name: Build
-        run: cat /dev/null | project/sbt ++${{ matrix.scala }} clean test doc
+        run: cat /dev/null | project/sbt ++${{ matrix.scala }} clean testFull doc
   check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Set up JDK 17
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@v5.6.0
         with:
           java-version: 17
           distribution: 'zulu'

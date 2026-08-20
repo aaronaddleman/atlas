@@ -527,7 +527,7 @@ object Interpreter {
     val escaped = str match {
       case "(" => "\\u0028"
       case ")" => "\\u0029"
-      case s =>
+      case s   =>
         val f = indexOfNonWhitespace(s)
         val l = lastIndexOfNonWhitespace(s)
         if (f >= 0 && l >= 0) {
@@ -551,7 +551,7 @@ object Interpreter {
     str match {
       case "(" => builder.append("\\u0028")
       case ")" => builder.append("\\u0029")
-      case s =>
+      case s   =>
         val f = indexOfNonWhitespace(s)
         val l = lastIndexOfNonWhitespace(s)
         if (f >= 0 && l >= 0) {

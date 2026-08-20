@@ -257,9 +257,12 @@ class EvaluatorSuite extends FunSuite {
           state = 2
         }
       },
-      // 2: After removing one, verify two keeps receiving events
+      // 2: After removing one, verify two keeps receiving events. The
+      // threshold must stay below the number of events a single replay of
+      // the finite resource file yields (~83); switching to ds3 cancels and
+      // restarts the "two" subscription, so it only gets one fresh replay.
       (_, two) => {
-        if (two.get() > 100) {
+        if (two.get() > 50) {
           sourceRef.stop()
         }
       }
@@ -589,6 +592,10 @@ class EvaluatorSuite extends FunSuite {
 
   test("validate: unsupported operation `:integral`") {
     invalidOperator("integral", "name,jvm.gc.pause,:eq,:sum,:integral")
+  }
+
+  test("validate: unsupported operation `:cumulative-max`") {
+    invalidOperator("cumulative-max", "name,jvm.gc.pause,:eq,:sum,:cumulative-max")
   }
 
   test("validate: unsupported operation `:filter`") {

@@ -129,6 +129,14 @@ object RequestHandler extends StrictLogging {
     val closeProbability: Double = {
       config.getDouble("atlas.pekko.request-handler.close-probability")
     }
+
+    // Lazy so the authenticator is built only when the routes are actually wired (the real
+    // `Settings(config)` path), not eagerly for the `defaultSettings` singleton built from
+    // `ConfigFactory.load()` at object init. A stateful authenticator otherwise gets constructed
+    // early from the wrong config source (and twice).
+    lazy val requestAuthenticator: RequestAuthenticator = {
+      RequestAuthenticator(config)
+    }
   }
 
   // Custom set of encoders, same as the default set used with the `encodeResponse` directive
@@ -160,7 +168,12 @@ object RequestHandler extends StrictLogging {
       }
     }
 
-    val finalRoutes = ok ~ route
+    // Establish the caller identity for the user routes. The health-check `ok` route is left
+    // outside the authenticator so that a strict authenticator cannot fail load-balancer probes.
+    // Placing the authenticator here, inside the exception/rejection handling, the access log, and
+    // the CORS wrapper below, ensures its rejections are rendered by the standard error handling,
+    // included in the access log, and carry CORS headers.
+    val finalRoutes = ok ~ settings.requestAuthenticator(route)
 
     // Automatically deal with compression
     val gzip =

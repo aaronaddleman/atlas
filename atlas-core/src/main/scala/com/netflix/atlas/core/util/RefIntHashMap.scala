@@ -15,6 +15,19 @@
  */
 package com.netflix.atlas.core.util
 
+object RefIntHashMap {
+
+  /**
+    * Consumer for [[RefIntHashMap.foreach]]. A single-abstract-method trait with a
+    * primitive `int` value parameter, so iteration does not box the value the way a
+    * `Function2[T, Int, Unit]` would. Call sites can still pass a lambda; it is
+    * converted to this SAM type.
+    */
+  trait Consumer[T] {
+    def accept(key: T, value: Int): Unit
+  }
+}
+
 /**
   * Mutable reference to integer map based on open-addressing. Primary use-case is
   * computing a count for the number of times a particular value was encountered.
@@ -38,6 +51,12 @@ class RefIntHashMap[T <: AnyRef](capacity: Int = 10) {
     ArrayHelper.newInstance[T](PrimeFinder.nextPrime(n))
   }
 
+  // The raw `hashCode` has weak high-bit dispersion, so mix it with `lowbias32`
+  // before reducing into the slot range (the reduction keys off the high bits).
+  private def hash(k: T, length: Int): Int = {
+    Hash.reduce(Hash.lowbias32(k.hashCode()), length)
+  }
+
   private def resize(): Unit = {
     val tmpKS = newArray(keys.length * 2)
     val tmpVS = new Array[Int](tmpKS.length)
@@ -53,10 +72,10 @@ class RefIntHashMap[T <: AnyRef](capacity: Int = 10) {
   }
 
   private def put(ks: Array[T], vs: Array[Int], k: T, v: Int): Boolean = {
-    var pos = Hash.absOrZero(k.hashCode()) % ks.length
+    var pos = hash(k, ks.length)
     var posV = ks(pos)
     while (posV != null && posV != k) {
-      pos = (pos + 1) % ks.length
+      pos = if (pos + 1 < ks.length) pos + 1 else 0
       posV = ks(pos)
     }
     ks(pos) = k
@@ -80,10 +99,10 @@ class RefIntHashMap[T <: AnyRef](capacity: Int = 10) {
     */
   def putIfAbsent(k: T, v: Int): Boolean = {
     if (used >= cutoff) resize()
-    var pos = Hash.absOrZero(k.hashCode()) % keys.length
+    var pos = hash(k, keys.length)
     var posV = keys(pos)
     while (posV != null && posV != k) {
-      pos = (pos + 1) % keys.length
+      pos = if (pos + 1 < keys.length) pos + 1 else 0
       posV = keys(pos)
     }
     if (posV != null) false
@@ -100,7 +119,7 @@ class RefIntHashMap[T <: AnyRef](capacity: Int = 10) {
     * `dflt` value will be returned.
     */
   def get(k: T, dflt: Int): Int = {
-    val start = Hash.absOrZero(k.hashCode()) % keys.length
+    val start = hash(k, keys.length)
     var pos = start
     while (true) {
       val prev = keys(pos)
@@ -109,7 +128,7 @@ class RefIntHashMap[T <: AnyRef](capacity: Int = 10) {
       else if (prev.equals(k))
         return values(pos)
       else {
-        pos = (pos + 1) % keys.length
+        pos = if (pos + 1 < keys.length) pos + 1 else 0
         // If we've wrapped around to the start, the key is not present
         if (pos == start)
           return dflt
@@ -130,7 +149,7 @@ class RefIntHashMap[T <: AnyRef](capacity: Int = 10) {
     */
   def increment(k: T, amount: Int): Unit = {
     if (used >= cutoff) resize()
-    var pos = Hash.absOrZero(k.hashCode()) % keys.length
+    var pos = hash(k, keys.length)
     while (true) {
       val prev = keys(pos)
       if (prev == null || prev == k) {
@@ -139,16 +158,21 @@ class RefIntHashMap[T <: AnyRef](capacity: Int = 10) {
         if (prev == null) used += 1
         return
       }
-      pos = (pos + 1) % keys.length
+      pos = if (pos + 1 < keys.length) pos + 1 else 0
     }
   }
 
-  /** Execute `f` for each item in the set. */
-  def foreach(f: (T, Int) => Unit): Unit = {
+  /**
+    * Execute `f` for each item in the set. Uses a specialized consumer rather than
+    * a `Function2[T, Int, Unit]` so the int value is not boxed on each call (a
+    * `Function2` with a reference-typed parameter falls back to the generic
+    * `apply(Object, Object)`, which boxes the int).
+    */
+  def foreach(f: RefIntHashMap.Consumer[T]): Unit = {
     var i = 0
     while (i < keys.length) {
       val k = keys(i)
-      if (k != null) f(k, values(i))
+      if (k != null) f.accept(k, values(i))
       i += 1
     }
   }

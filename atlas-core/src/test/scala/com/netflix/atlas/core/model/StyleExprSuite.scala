@@ -27,6 +27,44 @@ class StyleExprSuite extends FunSuite {
   private val oneDay = Duration.ofDays(1)
   private val oneWeek = Duration.ofDays(7)
 
+  test("sed: catastrophic backtracking is bounded") {
+    // A pathological pattern that would otherwise burn hundreds of ms per legend
+    // (ReDoS). The bounded matcher must fail fast with a 400-mapped exception.
+    val expr = StyleExpr(
+      DataExpr.Sum(Query.True),
+      Map("legend" -> ("a" * 40), "sed" -> "(.*a){25},X,:s")
+    )
+    val start = System.nanoTime()
+    intercept[IllegalArgumentException] {
+      expr.legend("x", Map.empty)
+    }
+    val elapsedMs = (System.nanoTime() - start) / 1000000
+    assert(elapsedMs < 1000, s"matching was not bounded, took ${elapsedMs}ms")
+  }
+
+  test("sed: normal search and replace still works") {
+    val expr = StyleExpr(
+      DataExpr.Sum(Query.True),
+      Map("legend" -> "$name", "sed" -> "^(?<prefix>[a-z]+)-.*$,group [$prefix] / [$1],:s")
+    )
+    assertEquals(expr.legend("x", Map("name" -> "abc-123")), "group [abc] / [abc]")
+  }
+
+  test("legend: default label annotated with offset") {
+    val expr = StyleExpr(DataExpr.Sum(Query.True).withOffset(oneWeek), Map.empty)
+    assertEquals(expr.legend("name=foo", Map.empty), "name=foo (offset=1w)")
+  }
+
+  test("legend: explicit legend is not annotated with offset") {
+    val expr = StyleExpr(DataExpr.Sum(Query.True).withOffset(oneWeek), Map("legend" -> "custom"))
+    assertEquals(expr.legend("name=foo", Map.empty), "custom")
+  }
+
+  test("legend: no offset, no annotation") {
+    val expr = StyleExpr(DataExpr.Sum(Query.True), Map.empty)
+    assertEquals(expr.legend("name=foo", Map.empty), "name=foo")
+  }
+
   test("perOffset") {
     val expr = StyleExpr(DataExpr.Sum(Query.True), Map("offset" -> "(,0h,1d,1w,)"))
     val expected = List(
@@ -55,7 +93,7 @@ class StyleExprSuite extends FunSuite {
 
   private def newTimeSeries(label: String, tags: Map[String, String]): TimeSeries = {
     val data = new FunctionTimeSeq(DsType.Gauge, 1, _ => Double.NaN)
-    LazyTimeSeries(tags, label, data)
+    LazyTimeSeries(tags, Some(label), data)
   }
 
   test("decode after substitute") {

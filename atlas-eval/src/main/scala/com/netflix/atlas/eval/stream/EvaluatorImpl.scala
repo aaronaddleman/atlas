@@ -202,7 +202,8 @@ private[stream] abstract class EvaluatorImpl(
   }
 
   protected def createPublisherImpl(uri: Uri): Publisher[JsonSupport] = {
-    val ds = DataSources.of(new DataSource("_", uri.toString()))
+    val dataSource = new DataSource("_", uri.toString())
+    val ds = DataSources.of(dataSource)
 
     val source = uri.scheme match {
       case s if s.startsWith("http") =>
@@ -217,7 +218,7 @@ private[stream] abstract class EvaluatorImpl(
 
     val (logSrc, context) = createStreamContextSource
     source
-      .via(createProcessorFlow(context))
+      .via(createProcessorFlow(context, getHost(dataSource)))
       .via(new OnUpstreamFinish[MessageEnvelope](context.dsLogger.close()))
       .merge(logSrc, eagerComplete = false)
       .map(_.message)
@@ -242,8 +243,13 @@ private[stream] abstract class EvaluatorImpl(
       .via(new FillRemovedKeysWith[String, DataSources](_ => DataSources.empty()))
       .flatMapMerge(Int.MaxValue, dssMap => Source(dssMap.toList))
       .groupBy(Int.MaxValue, _._1, true) // groupBy host
-      .map(_._2) // keep only DataSources
-      .via(createProcessorFlow(context))
+      .flatMapPrefix(1) { prefix =>
+        val host = prefix.headOption.map(_._1).getOrElse("_")
+        Flow[(String, DataSources)]
+          .prepend(Source(prefix.toList))
+          .map(_._2) // keep only DataSources
+          .via(createProcessorFlow(context, host))
+      }
       .mergeSubstreams
       .via(new OnUpstreamFinish[MessageEnvelope](context.dsLogger.close()))
       .merge(logSrc, eagerComplete = false)
@@ -263,7 +269,8 @@ private[stream] abstract class EvaluatorImpl(
   }
 
   private[stream] def createProcessorFlow(
-    context: StreamContext
+    context: StreamContext,
+    host: String
   ): Flow[DataSources, MessageEnvelope, NotUsed] = {
 
     val g = GraphDSL.create() { implicit builder =>
@@ -278,12 +285,12 @@ private[stream] abstract class EvaluatorImpl(
 
       val intermediateEval = createInputFlow(context)
         .via(context.monitorFlow("10_InputBatches"))
-        .via(new LwcToAggrDatapoint(context))
+        .via(new LwcToAggrDatapoint(context, host))
         .flatMapConcat { t =>
           Source(t.groupByStep)
         }
         .groupBy(Int.MaxValue, _.step, allowClosedSubstreamRecreation = true)
-        .via(new TimeGrouped(context))
+        .via(new TimeGrouped(context, host))
         .mergeSubstreams
         .via(context.monitorFlow("11_GroupedDatapoints"))
 
@@ -305,7 +312,7 @@ private[stream] abstract class EvaluatorImpl(
       .map(ReplayLogging.log)
       .map { s =>
         val validated = context.validate(s)
-        context.setDataSources(validated)
+        context.setDataSources(host, validated)
         validated
       }
       .via(g)
@@ -330,9 +337,9 @@ private[stream] abstract class EvaluatorImpl(
     // Flow used for logging diagnostic messages
     val (logSrc, context) = createStreamContextSource
 
-    // Initialize context with fixed data sources
+    // Initialize context with fixed data sources, grouped by host to match the streaming path.
     context.validate(sources)
-    context.setDataSources(sources)
+    groupByHost(sources).foreach { case (host, dss) => context.setDataSources(host, dss) }
     val interpreter = context.interpreter
 
     // Extract data expressions to reuse for creating time groups

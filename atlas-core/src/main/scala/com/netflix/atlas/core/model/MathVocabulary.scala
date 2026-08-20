@@ -80,6 +80,7 @@ object MathVocabulary extends Vocabulary {
     Min,
     Max,
     Percentiles,
+    ApproxDistinct,
     SampleCount,
     TypedMacro(
       "sample-count",
@@ -1279,7 +1280,7 @@ object MathVocabulary extends Vocabulary {
         val expr = t match {
           case af: AggregateFunction => DataExpr.GroupBy(toSum(af), List(TagKey.percentile))
           case by: DataExpr.GroupBy  => DataExpr.GroupBy(toSum(by.af), TagKey.percentile :: by.keys)
-          case _ =>
+          case _                     =>
             throw new IllegalArgumentException(":percentiles can only be used with :sum and :by")
         }
         MathExpr.Percentiles(expr, pcts) :: stack
@@ -1308,6 +1309,46 @@ object MathVocabulary extends Vocabulary {
 
     override def examples: List[String] = List(
       "name,requestLatency,:eq,(,25,50,90,)"
+    )
+  }
+
+  case object ApproxDistinct extends SimpleWord {
+
+    override def name: String = "approx-distinct"
+
+    protected def matcher: PartialFunction[List[Any], Boolean] = {
+      case TimeSeriesExprType(t) :: _ =>
+        t.dataExprs.nonEmpty && !t.dataExprs.exists(_.isInstanceOf[DataExpr.All])
+    }
+
+    protected def executor: PartialFunction[List[Any], List[Any]] = {
+      // The estimator reshapes the input to the register grouping internally (forcing a max
+      // aggregate grouped by the register key), including through wrappers such as
+      // :cumulative-max. That is how :approx-distinct-cumulative composes.
+      case TimeSeriesExprType(t) :: stack =>
+        MathExpr.ApproxDistinct(t) :: stack
+    }
+
+    override def summary: String =
+      """
+        |Estimate the number of distinct values recorded into a distinct count sketch. The data
+        |must have been published appropriately to allow the approximation, as a set of
+        |per-register max-gauges tagged with `statistic=distinct` and a `distinct=R##` register
+        |id. If using [spectator](http://netflix.github.io/spectator/en/latest/), then see the
+        |`DistinctCountSketch` helper class.
+        |
+        |The registers are merged across all matching sources (by taking the max per register)
+        |and then collapsed to a single cardinality estimate using the same HyperLogLog estimator
+        |as the client. The result is an estimate, not an exact count, with a relative standard
+        |error of roughly 13%. Add `(,key,),:by` before the operator to break the estimate out by
+        |another dimension.
+      """.stripMargin.trim
+
+    override def signature: String = "TimeSeriesExpr -- Expr"
+
+    override def examples: List[String] = List(
+      "name,server.uniqueUsers,:eq",
+      "name,server.uniqueUsers,:eq,(,nf.region,),:by"
     )
   }
 

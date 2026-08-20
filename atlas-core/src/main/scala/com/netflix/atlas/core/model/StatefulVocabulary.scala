@@ -47,7 +47,9 @@ object StatefulVocabulary extends Vocabulary {
     SlidingDes,
     Trend,
     Integral,
+    CumulativeMax,
     Derivative,
+    approxDistinctCumulative,
     desTypedMacro("des-simple", List("10", "0.1", "0.5", ":des")),
     desTypedMacro("des-fast", List("10", "0.1", "0.02", ":des")),
     desTypedMacro("des-slower", List("10", "0.05", "0.03", ":des")),
@@ -58,6 +60,41 @@ object StatefulVocabulary extends Vocabulary {
     desTypedMacro("sdes-slow", List("10", "0.03", "0.04", ":sdes")),
     Macro("des-epic-signal", desEpicSignal, List("name,sps,:eq,:sum,10,0.1,0.5,0.2,0.2,4"))
   )
+
+  // Cumulative distinct count: max the sketch registers across time before estimating. This is
+  // a macro over the existing operators: apply :cumulative-max to the register series and then
+  // :approx-distinct to collapse them. :approx-distinct rewrites the data expression to the
+  // register grouping through the :cumulative-max wrapper, so the running max is applied per
+  // register (maxing per-interval estimates would be wrong). The estimator itself is unaware of
+  // the cumulative step. It is stateful (via :cumulative-max), hence it lives here rather than
+  // with :approx-distinct in the math vocabulary.
+  private def approxDistinctCumulative: TypedMacro = {
+    TypedMacro(
+      "approx-distinct-cumulative",
+      List(
+        ":dup",
+        ":cumulative-max",
+        ":approx-distinct",
+        "approx-distinct-cumulative",
+        ":named-rewrite"
+      ),
+      ArraySeq(Parameter("", "distinct count sketch query", TimeSeriesExprType)),
+      ArraySeq(TimeSeriesExprType),
+      """
+        |Estimate the cumulative number of distinct values recorded into a distinct count sketch
+        |from the start of the graph window up to each point in time. Unlike `:approx-distinct`,
+        |which estimates each interval independently, this maxes the sketch registers across time
+        |(via `:cumulative-max`) before estimating, giving a non-decreasing running count of the
+        |distinct values seen so far. This answers questions like "how many unique viewers have we
+        |seen so far" for a live event. Add `(,key,),:by` before the operator to break the estimate
+        |out by another dimension.
+      """.stripMargin.trim,
+      List(
+        "name,server.uniqueUsers,:eq",
+        "name,server.uniqueUsers,:eq,(,nf.region,),:by"
+      )
+    )
+  }
 
   private def desTypedMacro(name: String, body: List[String]): TypedMacro = {
     val fullBody = (":dup" :: body) ::: List(name, ":named-rewrite")
@@ -561,6 +598,43 @@ object StatefulVocabulary extends Vocabulary {
       """.stripMargin.trim
 
     override def examples: List[String] = List("1", "name,requestsPerSecond,:eq,:sum,:per-step")
+  }
+
+  case object CumulativeMax extends TypedWord with StylePassthrough {
+
+    override def name: String = "cumulative-max"
+
+    override def parameters: IndexedSeq[Parameter] = ArraySeq(
+      Parameter("", "input time series", TimeSeriesExprType)
+    )
+
+    override def outputs: IndexedSeq[DataType] = ArraySeq(TimeSeriesExprType)
+
+    override def execute(context: Context, params: IndexedSeq[Any]): Context = {
+      val t = params(0).asInstanceOf[TimeSeriesExpr]
+      context.copy(stack = StatefulExpr.CumulativeMax(t) :: context.stack)
+    }
+
+    override def summary: String =
+      """
+        |Compute the maximum value across the evaluation context. Each datapoint for the output
+        |line represents the maximum value seen on the input line from the start of the graph up
+        |to the time for that datapoint. This is the max analogue of
+        |[:integral](stateful-integral): a running max from the window start rather than a sliding
+        |window like [:rolling-max](stateful-rolling‐max). Missing values, `NaN`, are ignored and
+        |leave the running max unchanged. For example:
+        |
+        || Input | :cumulative-max |
+        ||-------|-----------------|
+        || 1     | 1               |
+        || 2     | 2               |
+        || 0     | 2               |
+        || NaN   | 2               |
+        || 5     | 5               |
+        || 3     | 5               |
+      """.stripMargin.trim
+
+    override def examples: List[String] = List("1", "name,activeUsers,:eq,:sum")
   }
 
   case object Derivative extends TypedWord with StylePassthrough {

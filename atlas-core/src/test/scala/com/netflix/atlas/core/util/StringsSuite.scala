@@ -186,6 +186,16 @@ class StringsSuite extends FunSuite {
     assertEquals(unescape(decoded), decoded)
   }
 
+  test("escape, supplementary code point round-trips") {
+    // U+1F600 is above the BMP, so escape must emit a UTF-16 surrogate pair that unescape can
+    // decode back; a single five-hex `\uXXXXX` would leave a stray digit (escape/unescape must
+    // be exact inverses).
+    val emoji = new String(Character.toChars(0x1F600))
+    val escaped = escape(emoji, _ => true)
+    assertEquals(escaped, "\\ud83d\\ude00")
+    assertEquals(unescape(escaped), emoji)
+  }
+
   test("unescape") {
     var i = 0
     while (i < Short.MaxValue) {
@@ -305,6 +315,14 @@ class StringsSuite extends FunSuite {
     assertEquals(parseDuration("42years"), Duration.ofDays(42 * 365))
     assertEquals(parseDuration("42year"), Duration.ofDays(42 * 365))
     assertEquals(parseDuration("42y"), Duration.ofDays(42 * 365))
+  }
+
+  test("parseDuration, overflow is a client error") {
+    // Amounts that fit in a Long but overflow the duration arithmetic must surface
+    // as an IllegalArgumentException (400) rather than an ArithmeticException (500).
+    intercept[IllegalArgumentException] { parseDuration("9999999999999999y") }
+    intercept[IllegalArgumentException] { parseDuration("99999999999999999d") }
+    intercept[IllegalArgumentException] { parseDuration("999999999999999999m") }
   }
 
   test("parseDuration, at invalid unit") {

@@ -12,9 +12,9 @@ jobs:
     runs-on: ubuntu-latest
     environment: Publish
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Set up JDK
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@v5.6.0
         with:
           java-version: 17
           distribution: 'zulu'
@@ -32,4 +32,4 @@ jobs:
           PGP_PASSPHRASE: ${{ secrets.ORG_SIGNING_PASSWORD }}
         run: |
           git fetch --unshallow --tags
-          cat /dev/null | project/sbt ++2.13.18 clean test +publishSigned
+          cat /dev/null | project/sbt ++2.13.18 clean testFull +publishSigned
