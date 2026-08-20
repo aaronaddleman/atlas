@@ -1,10 +1,19 @@
 #!/bin/bash
 #
-# Stress test for /api/v1/expr/debug quadratic memory growth.
+# Stress test for /api/v1/expr/debug step-count memory/response growth.
 #
-# Uses the :fcall pattern to generate many debug steps in a compact URL.
-# The setup defines a function f, then calls it N times. Each ,f,:fcall
-# is only 9 chars, so we can fit thousands of steps under the URI limit.
+# The stack-doubling attack (:each/:fcall/:dup used to exponentially grow
+# the stack) is already blocked on main by the maxStackSize guard added in
+# nextStep() (see Interpreter.scala, PR #1892) - that returns a fast 400
+# well before any real memory pressure.
+#
+# This test instead uses a pattern that keeps the stack pinned at size 1
+# (push once, then repeat ,:dup,:drop) so it never trips the stack-size
+# guard, while still driving the step/token count arbitrarily high. On
+# main, /api/v1/expr/debug returns one JSON entry per step, so response
+# size and memory grow linearly (or worse, once JSON encoding overhead is
+# counted) with N. The chunk-based debug endpoint on this branch should
+# instead return a bounded number of chunk entries regardless of N.
 #
 # Usage:
 #   ./scripts/stresstest.sh [--wait] [step] [repeats]
@@ -63,9 +72,10 @@ else
   fi
 fi
 
-echo "=== /api/v1/expr/debug quadratic growth stress test ==="
+echo "=== /api/v1/expr/debug step-count growth stress test ==="
 echo ""
-echo "Using :fcall pattern to pack many debug steps into a compact URL."
+echo "Using a stack-pinned ,:dup,:drop chain (stack size stays at 1) so the"
+echo "stack-size guard never trips, while step/token count grows with N."
 echo "Step increment: $STEP, repeats: $REPEATS"
 echo ""
 printf "%-8s  %-6s  %-10s  %-14s  %-10s\n" "depth" "run" "time(s)" "resp_bytes" "bytes/N^2"
@@ -75,7 +85,7 @@ n=0
 while true; do
   n=$((n + STEP))
 
-  url="http://$ATLAS_HOST/api/v1/expr/debug?q=(,:depth,:nlist,(,:dup,),:each,),f,:sset,1$(printf ',f,:fcall%.0s' $(seq $n))"
+  url="http://$ATLAS_HOST/api/v1/expr/debug?q=1$(printf ',:dup,:drop%.0s' $(seq $n))"
 
   for r in $(seq 1 "$REPEATS"); do
     result=$(curl -s -w "\n%{http_code} %{time_total} %{size_download}" \

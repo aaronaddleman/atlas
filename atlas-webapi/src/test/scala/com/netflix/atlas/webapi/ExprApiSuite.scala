@@ -50,8 +50,8 @@ class ExprApiSuite extends MUnitRouteSuite {
 
   testGet("/api/v1/expr?q=name,sps,:eq") {
     assertEquals(response.status, StatusCodes.OK)
-    val data = Json.decode[List[ExprApiSuite.ChunkOutput]](responseAs[String])
-    assertEquals(data.size, 1)
+    val data = Json.decode[ExprApiSuite.DebugResponse](responseAs[String])
+    assertEquals(data.steps.size, 1)
   }
 
   testGet("/api/v1/expr/debug") {
@@ -60,17 +60,16 @@ class ExprApiSuite extends MUnitRouteSuite {
 
   testGet("/api/v1/expr/debug?q=name,sps,:eq") {
     assertEquals(response.status, StatusCodes.OK)
-    val data = Json.decode[List[ExprApiSuite.ChunkOutput]](responseAs[String])
-    assertEquals(data.size, 1)
+    val data = Json.decode[ExprApiSuite.DebugResponse](responseAs[String])
+    assertEquals(data.steps.size, 1)
+    assertEquals(data.plan.size, 1)
 
     val sig = response.headers.find(_.is(ExprApi.QuerySignatureHeader.toLowerCase))
     val total = response.headers.find(_.is(ExprApi.ChunkTotalHeader.toLowerCase))
-    val planHdr = response.headers.find(_.is(ExprApi.ChunkPlanHeader.toLowerCase))
     assert(sig.isDefined, "expected query signature header")
     assertEquals(sig.get.value().length, 64)
     assert(total.isDefined, "expected chunk total header")
     assertEquals(total.get.value(), "1")
-    assert(planHdr.isDefined, "expected chunk plan header")
   }
 
   testGet("/api/v1/expr/debug?q=1,:dup,:dup&vocab=std") {
@@ -82,15 +81,15 @@ class ExprApiSuite extends MUnitRouteSuite {
 
   testGet("/api/v1/expr/debug?q=name,sps,:eq,:sum,$name,:legend&vocab=style") {
     assertEquals(response.status, StatusCodes.OK)
-    val data = Json.decode[List[ExprApiSuite.ChunkOutput]](responseAs[String])
-    assertEquals(data.size, 1)
+    val data = Json.decode[ExprApiSuite.DebugResponse](responseAs[String])
+    assertEquals(data.steps.size, 1)
   }
 
   testGet("/api/v1/expr/debug?q=name,sps,:eq,:sum,$name,:legend,foo,:sset,foo,:get") {
     assertEquals(response.status, StatusCodes.OK)
-    val data = Json.decode[List[ExprApiSuite.ChunkOutput]](responseAs[String])
-    assertEquals(data.size, 3)
-    assert(data.last.context.variables("foo") == "name,sps,:eq,:sum,$name,:legend")
+    val data = Json.decode[ExprApiSuite.DebugResponse](responseAs[String])
+    assertEquals(data.steps.size, 3)
+    assert(data.steps.last.context.variables("foo") == "name,sps,:eq,:sum,$name,:legend")
   }
 
   testGet("/api/v1/expr/debug?q=name,sps,:eq,:sum,$name,:legend&vocab=query") {
@@ -695,6 +694,10 @@ class ExprApiSuite extends MUnitRouteSuite {
 object ExprApiSuite {
 
   case class ChunkOutput(chunk: Int, tokens: List[String], context: Context)
+
+  case class PlanEntry(index: Int, start: Int, end: Int, splitBefore: Option[String])
+
+  case class DebugResponse(steps: List[ChunkOutput], plan: List[PlanEntry])
 
   case class Context(stack: List[String], variables: Map[String, String])
 

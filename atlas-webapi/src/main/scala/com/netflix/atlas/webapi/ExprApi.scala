@@ -15,9 +15,6 @@
  */
 package com.netflix.atlas.webapi
 
-import java.nio.charset.StandardCharsets
-import java.util.Base64
-
 import org.apache.pekko.http.scaladsl.model.HttpEntity
 import org.apache.pekko.http.scaladsl.model.HttpHeader
 import org.apache.pekko.http.scaladsl.model.HttpResponse
@@ -164,7 +161,11 @@ class ExprApi extends WebApi {
       }
     }
     finalCtx.foreach(ctx => verifyStackContents(vocabName, ctx.stack))
-    jsonResponse(steps.result(), ExprApi.chunkPlanHeaders(plan))
+    val body = Map(
+      "steps" -> steps.result(),
+      "plan"  -> ExprApi.chunkPlanJson(plan)
+    )
+    jsonResponse(body, ExprApi.chunkPlanHeaders(plan))
   }
 
   private def processNormalizeRequest(query: String, vocabName: String): HttpResponse = {
@@ -306,33 +307,31 @@ object ExprApi {
   /** Header names for the chunk planner metadata. See ChunkPlanner for protocol. */
   val QuerySignatureHeader = "X-Atlas-Query-Signature"
   val ChunkTotalHeader = "X-Atlas-Chunk-Total"
-  val ChunkPlanHeader = "X-Atlas-Chunk-Plan"
 
   /**
     * Build the response headers that describe the chunk plan for a debug
-    * request. Always emits the query signature and chunk total. The plan
-    * header (base64-encoded JSON) is omitted when the query produces no
-    * chunks, to keep empty responses clean.
+    * request: the query signature and the total chunk count.
     */
   private[webapi] def chunkPlanHeaders(plan: ChunkPlanner.Plan): List[HttpHeader] = {
-    val base = List(
+    List(
       RawHeader(QuerySignatureHeader, plan.signature),
       RawHeader(ChunkTotalHeader, plan.chunks.size.toString)
     )
-    if (plan.chunks.isEmpty) base
-    else {
-      val planJson = plan.chunks.map { c =>
-        Map(
-          "index"       -> c.index,
-          "start"       -> c.start,
-          "end"         -> c.end,
-          "splitBefore" -> c.splitBefore.orNull
-        )
-      }
-      val encoded = Base64.getEncoder.encodeToString(
-        Json.encode(planJson).getBytes(StandardCharsets.UTF_8)
+  }
+
+  /**
+    * Build the chunk plan metadata included in the debug response body: one
+    * entry per chunk with the token range and the operator that triggered the
+    * boundary. Bounded by `max-chunks-per-query`, same as the `steps` array.
+    */
+  private[webapi] def chunkPlanJson(plan: ChunkPlanner.Plan): List[Map[String, Any]] = {
+    plan.chunks.map { c =>
+      Map(
+        "index"       -> c.index,
+        "start"       -> c.start,
+        "end"         -> c.end,
+        "splitBefore" -> c.splitBefore.orNull
       )
-      base :+ RawHeader(ChunkPlanHeader, encoded)
     }
   }
 
