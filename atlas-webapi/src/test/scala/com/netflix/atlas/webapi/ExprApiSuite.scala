@@ -25,6 +25,7 @@ import com.netflix.atlas.core.model.StyleExpr
 import com.netflix.atlas.core.model.StyleVocabulary
 import com.netflix.atlas.core.stacklang.Interpreter
 import com.netflix.atlas.json3.Json
+import com.netflix.atlas.pekko.DiagnosticMessage
 import com.netflix.atlas.pekko.RequestHandler
 import com.netflix.atlas.pekko.testkit.MUnitRouteSuite
 
@@ -77,6 +78,22 @@ class ExprApiSuite extends MUnitRouteSuite {
     val total = response.headers.find(_.is(ExprApi.ChunkTotalHeader.toLowerCase))
     assert(total.isDefined)
     assertEquals(total.get.value(), "3")
+  }
+
+  test("step limit exceeded rejects a query with too many predictable tokens") {
+    // All-predictable tokens collapse to a single chunk, so `max-chunks-per-query`
+    // never fires. This should be caught by `max-steps` instead.
+    val tokenCount = ApiSettings.debugMaxSteps + 1
+    val query = List.fill(tokenCount)("1").mkString(",")
+    Get(s"/api/v1/expr/debug?q=$query&vocab=std") ~> routes ~> check {
+      assertEquals(response.status, StatusCodes.BadRequest)
+      val msg = Json.decode[DiagnosticMessage](responseAs[String])
+      assertEquals(msg.typeName, "error")
+      assertEquals(
+        msg.message,
+        s"StepLimitExceeded: query produces $tokenCount steps, exceeds limit of ${ApiSettings.debugMaxSteps}"
+      )
+    }
   }
 
   testGet("/api/v1/expr/debug?q=name,sps,:eq,:sum,$name,:legend&vocab=style") {

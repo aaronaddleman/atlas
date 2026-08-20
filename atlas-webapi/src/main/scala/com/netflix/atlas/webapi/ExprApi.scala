@@ -140,6 +140,10 @@ class ExprApi extends WebApi {
     val interpreter = newInterpreter(vocabName)
     val plan = ChunkPlanner.plan(query, ApiSettings.debugMaxChunksPerQuery)
     val totalTokens = Interpreter.splitAndTrim(query).size
+    val maxSteps = ApiSettings.debugMaxSteps
+    if (totalTokens > maxSteps) {
+      throw new ExprApi.StepLimitExceeded(totalTokens, maxSteps)
+    }
     val steps = List.newBuilder[Map[String, Any]]
     var chunkIdx = 0
     var finalCtx: Option[Context] = None
@@ -307,6 +311,17 @@ object ExprApi {
   /** Header names for the chunk planner metadata. See ChunkPlanner for protocol. */
   val QuerySignatureHeader = "X-Atlas-Query-Signature"
   val ChunkTotalHeader = "X-Atlas-Chunk-Total"
+
+  /**
+    * Thrown when a query has more tokens than `max-steps` allows. Unlike
+    * `ChunkPlanner.ChunkLimitExceeded`, which only bounds the number of
+    * unpredictable-operator boundaries, this bounds the total amount of work
+    * the debug endpoint will do walking the interpreter's step iterator.
+    */
+  class StepLimitExceeded(val total: Int, val limit: Int)
+      extends IllegalArgumentException(
+        s"query produces $total steps, exceeds limit of $limit"
+      )
 
   /**
     * Build the response headers that describe the chunk plan for a debug
