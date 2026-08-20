@@ -101,7 +101,9 @@ class ExprApiSuite extends MUnitRouteSuite {
       assertEquals(msg.typeName, "error")
       assertEquals(
         msg.message,
-        s"StepLimitExceeded: query produces $tokenCount steps, exceeds limit of ${ApiSettings.debugMaxSteps}"
+        s"StepLimitExceeded: query produces $tokenCount steps, exceeds limit of ${
+            ApiSettings.debugMaxSteps
+          }"
       )
     }
   }
