@@ -25,6 +25,7 @@ import com.netflix.atlas.core.model.StyleExpr
 import com.netflix.atlas.core.model.StyleVocabulary
 import com.netflix.atlas.core.stacklang.Interpreter
 import com.netflix.atlas.json3.Json
+import com.netflix.atlas.pekko.DiagnosticMessage
 import com.netflix.atlas.pekko.RequestHandler
 import com.netflix.atlas.pekko.testkit.MUnitRouteSuite
 
@@ -60,8 +61,8 @@ class ExprApiSuite extends MUnitRouteSuite {
 
   testGet("/api/v1/expr?q=name,sps,:eq") {
     assertEquals(response.status, StatusCodes.OK)
-    val data = Json.decode[List[ExprApiSuite.Output]](responseAs[String])
-    assertEquals(data.size, 4)
+    val data = Json.decode[ExprApiSuite.DebugResponse](responseAs[String])
+    assertEquals(data.steps.size, 1)
   }
 
   testGet("/api/v1/expr/debug") {
@@ -70,21 +71,54 @@ class ExprApiSuite extends MUnitRouteSuite {
 
   testGet("/api/v1/expr/debug?q=name,sps,:eq") {
     assertEquals(response.status, StatusCodes.OK)
-    val data = Json.decode[List[ExprApiSuite.Output]](responseAs[String])
-    assertEquals(data.size, 4)
+    val data = Json.decode[ExprApiSuite.DebugResponse](responseAs[String])
+    assertEquals(data.steps.size, 1)
+    assertEquals(data.plan.size, 1)
+
+    val sig = response.headers.find(_.is(ExprApi.QuerySignatureHeader.toLowerCase))
+    val total = response.headers.find(_.is(ExprApi.ChunkTotalHeader.toLowerCase))
+    assert(sig.isDefined, "expected query signature header")
+    assertEquals(sig.get.value().length, 64)
+    assert(total.isDefined, "expected chunk total header")
+    assertEquals(total.get.value(), "1")
+  }
+
+  testGet("/api/v1/expr/debug?q=1,:dup,:dup&vocab=std") {
+    assertEquals(response.status, StatusCodes.OK)
+    val total = response.headers.find(_.is(ExprApi.ChunkTotalHeader.toLowerCase))
+    assert(total.isDefined)
+    assertEquals(total.get.value(), "3")
+  }
+
+  test("step limit exceeded rejects a query with too many predictable tokens") {
+    // All-predictable tokens collapse to a single chunk, so `max-chunks-per-query`
+    // never fires. This should be caught by `max-steps` instead.
+    val tokenCount = ApiSettings.debugMaxSteps + 1
+    val query = List.fill(tokenCount)("1").mkString(",")
+    Get(s"/api/v1/expr/debug?q=$query&vocab=std") ~> routes ~> check {
+      assertEquals(response.status, StatusCodes.BadRequest)
+      val msg = Json.decode[DiagnosticMessage](responseAs[String])
+      assertEquals(msg.typeName, "error")
+      assertEquals(
+        msg.message,
+        s"StepLimitExceeded: query produces $tokenCount steps, exceeds limit of ${
+            ApiSettings.debugMaxSteps
+          }"
+      )
+    }
   }
 
   testGet("/api/v1/expr/debug?q=name,sps,:eq,:sum,$name,:legend&vocab=style") {
     assertEquals(response.status, StatusCodes.OK)
-    val data = Json.decode[List[ExprApiSuite.Output]](responseAs[String])
-    assertEquals(data.size, 7)
+    val data = Json.decode[ExprApiSuite.DebugResponse](responseAs[String])
+    assertEquals(data.steps.size, 1)
   }
 
   testGet("/api/v1/expr/debug?q=name,sps,:eq,:sum,$name,:legend,foo,:sset,foo,:get") {
     assertEquals(response.status, StatusCodes.OK)
-    val data = Json.decode[List[ExprApiSuite.Output]](responseAs[String])
-    assertEquals(data.size, 11)
-    assert(data.last.context.variables("foo") == "name,sps,:eq,:sum,$name,:legend")
+    val data = Json.decode[ExprApiSuite.DebugResponse](responseAs[String])
+    assertEquals(data.steps.size, 3)
+    assert(data.steps.last.context.variables("foo") == "name,sps,:eq,:sum,$name,:legend")
   }
 
   testGet("/api/v1/expr/debug?q=name,sps,:eq,:sum,$name,:legend&vocab=query") {
@@ -688,7 +722,11 @@ class ExprApiSuite extends MUnitRouteSuite {
 
 object ExprApiSuite {
 
-  case class Output(program: List[String], context: Context)
+  case class ChunkOutput(chunk: Int, tokens: List[String], context: Context)
+
+  case class PlanEntry(index: Int, start: Int, end: Int, splitBefore: Option[String])
+
+  case class DebugResponse(steps: List[ChunkOutput], plan: List[PlanEntry])
 
   case class Context(stack: List[String], variables: Map[String, String])
 

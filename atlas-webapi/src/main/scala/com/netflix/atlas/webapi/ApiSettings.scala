@@ -88,6 +88,10 @@ class ApiSettings(root: => Config) {
     config.getStringList("expr.complete.excluded-words").asScala.toSet
   }
 
+  def debugMaxChunksPerQuery: Int = config.getInt("expr.debug.max-chunks-per-query")
+
+  def debugMaxSteps: Int = config.getInt("expr.debug.max-steps")
+
   def normalizeConfig: Config = root.getConfig("atlas.core.normalize")
 
   private def newInstance[T](cls: String): T = {

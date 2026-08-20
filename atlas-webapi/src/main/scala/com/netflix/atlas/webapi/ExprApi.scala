@@ -16,9 +16,11 @@
 package com.netflix.atlas.webapi
 
 import org.apache.pekko.http.scaladsl.model.HttpEntity
+import org.apache.pekko.http.scaladsl.model.HttpHeader
 import org.apache.pekko.http.scaladsl.model.HttpResponse
 import org.apache.pekko.http.scaladsl.model.MediaTypes
 import org.apache.pekko.http.scaladsl.model.StatusCodes
+import org.apache.pekko.http.scaladsl.model.headers.RawHeader
 import org.apache.pekko.http.scaladsl.server.Directives.*
 import org.apache.pekko.http.scaladsl.server.Route
 import com.netflix.atlas.core.model.Expr
@@ -136,18 +138,38 @@ class ExprApi extends WebApi {
 
   private def processDebugRequest(query: String, vocabName: String): HttpResponse = {
     val interpreter = newInterpreter(vocabName)
-    val execSteps = interpreter.debug(query)
-    if (execSteps.nonEmpty) {
-      verifyStackContents(vocabName, execSteps.last.context.stack)
+    val plan = ChunkPlanner.plan(query, ApiSettings.debugMaxChunksPerQuery)
+    val totalTokens = Interpreter.splitAndTrim(query).size
+    val maxSteps = ApiSettings.debugMaxSteps
+    if (totalTokens > maxSteps) {
+      throw new ExprApi.StepLimitExceeded(totalTokens, maxSteps)
     }
-
-    val steps = execSteps.map { step =>
-      val stack = step.context.stack.map(valueString)
-      val vars = step.context.variables.map(t => t._1 -> valueString(t._2))
-      val ctxt = Map("stack" -> stack, "variables" -> vars)
-      Map("program" -> step.program, "context" -> ctxt)
+    val steps = List.newBuilder[Map[String, Any]]
+    var chunkIdx = 0
+    var finalCtx: Option[Context] = None
+    val iter = interpreter.debug(query)
+    while (iter.hasNext) {
+      val step = iter.next()
+      finalCtx = Some(step.context)
+      val tokensProcessed = totalTokens - step.program.size
+      while (chunkIdx < plan.chunks.size && plan.chunks(chunkIdx).end <= tokensProcessed) {
+        val chunk = plan.chunks(chunkIdx)
+        val stack = step.context.stack.map(valueString)
+        val vars = step.context.variables.map(t => t._1 -> valueString(t._2))
+        steps += Map(
+          "chunk"   -> chunk.index,
+          "tokens"  -> chunk.tokens,
+          "context" -> Map("stack" -> stack, "variables" -> vars)
+        )
+        chunkIdx += 1
+      }
     }
-    jsonResponse(steps)
+    finalCtx.foreach(ctx => verifyStackContents(vocabName, ctx.stack))
+    val body = Map(
+      "steps" -> steps.result(),
+      "plan"  -> ExprApi.chunkPlanJson(plan)
+    )
+    jsonResponse(body, ExprApi.chunkPlanHeaders(plan))
   }
 
   private def processNormalizeRequest(query: String, vocabName: String): HttpResponse = {
@@ -272,15 +294,61 @@ class ExprApi extends WebApi {
 
   /** Encode `obj` as json and create the HttpResponse. */
   private def jsonResponse(obj: AnyRef): HttpResponse = {
+    jsonResponse(obj, Nil)
+  }
+
+  private def jsonResponse(obj: AnyRef, headers: List[HttpHeader]): HttpResponse = {
     val data = Json.encode(obj)
     val entity = HttpEntity(MediaTypes.`application/json`, data)
-    HttpResponse(StatusCodes.OK, entity = entity)
+    HttpResponse(StatusCodes.OK, headers, entity)
   }
 }
 
 object ExprApi {
 
   private val normalizer = new ExprNormalizer(ApiSettings.normalizeConfig)
+
+  /** Header names for the chunk planner metadata. See ChunkPlanner for protocol. */
+  val QuerySignatureHeader = "X-Atlas-Query-Signature"
+  val ChunkTotalHeader = "X-Atlas-Chunk-Total"
+
+  /**
+    * Thrown when a query has more tokens than `max-steps` allows. Unlike
+    * `ChunkPlanner.ChunkLimitExceeded`, which only bounds the number of
+    * unpredictable-operator boundaries, this bounds the total amount of work
+    * the debug endpoint will do walking the interpreter's step iterator.
+    */
+  class StepLimitExceeded(val total: Int, val limit: Int)
+      extends IllegalArgumentException(
+        s"query produces $total steps, exceeds limit of $limit"
+      )
+
+  /**
+    * Build the response headers that describe the chunk plan for a debug
+    * request: the query signature and the total chunk count.
+    */
+  private[webapi] def chunkPlanHeaders(plan: ChunkPlanner.Plan): List[HttpHeader] = {
+    List(
+      RawHeader(QuerySignatureHeader, plan.signature),
+      RawHeader(ChunkTotalHeader, plan.chunks.size.toString)
+    )
+  }
+
+  /**
+    * Build the chunk plan metadata included in the debug response body: one
+    * entry per chunk with the token range and the operator that triggered the
+    * boundary. Bounded by `max-chunks-per-query`, same as the `steps` array.
+    */
+  private[webapi] def chunkPlanJson(plan: ChunkPlanner.Plan): List[Map[String, Any]] = {
+    plan.chunks.map { c =>
+      Map(
+        "index"       -> c.index,
+        "start"       -> c.start,
+        "end"         -> c.end,
+        "splitBefore" -> c.splitBefore.orNull
+      )
+    }
+  }
 
   /**
     * Normalizes an Atlas expression program into a canonical string representation.
