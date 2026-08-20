@@ -50,8 +50,8 @@ class ExprApiSuite extends MUnitRouteSuite {
 
   testGet("/api/v1/expr?q=name,sps,:eq") {
     assertEquals(response.status, StatusCodes.OK)
-    val data = Json.decode[List[ExprApiSuite.Output]](responseAs[String])
-    assertEquals(data.size, 4)
+    val data = Json.decode[List[ExprApiSuite.ChunkOutput]](responseAs[String])
+    assertEquals(data.size, 1)
   }
 
   testGet("/api/v1/expr/debug") {
@@ -60,8 +60,8 @@ class ExprApiSuite extends MUnitRouteSuite {
 
   testGet("/api/v1/expr/debug?q=name,sps,:eq") {
     assertEquals(response.status, StatusCodes.OK)
-    val data = Json.decode[List[ExprApiSuite.Output]](responseAs[String])
-    assertEquals(data.size, 4)
+    val data = Json.decode[List[ExprApiSuite.ChunkOutput]](responseAs[String])
+    assertEquals(data.size, 1)
 
     val sig = response.headers.find(_.is(ExprApi.QuerySignatureHeader.toLowerCase))
     val total = response.headers.find(_.is(ExprApi.ChunkTotalHeader.toLowerCase))
@@ -82,14 +82,14 @@ class ExprApiSuite extends MUnitRouteSuite {
 
   testGet("/api/v1/expr/debug?q=name,sps,:eq,:sum,$name,:legend&vocab=style") {
     assertEquals(response.status, StatusCodes.OK)
-    val data = Json.decode[List[ExprApiSuite.Output]](responseAs[String])
-    assertEquals(data.size, 7)
+    val data = Json.decode[List[ExprApiSuite.ChunkOutput]](responseAs[String])
+    assertEquals(data.size, 1)
   }
 
   testGet("/api/v1/expr/debug?q=name,sps,:eq,:sum,$name,:legend,foo,:sset,foo,:get") {
     assertEquals(response.status, StatusCodes.OK)
-    val data = Json.decode[List[ExprApiSuite.Output]](responseAs[String])
-    assertEquals(data.size, 11)
+    val data = Json.decode[List[ExprApiSuite.ChunkOutput]](responseAs[String])
+    assertEquals(data.size, 3)
     assert(data.last.context.variables("foo") == "name,sps,:eq,:sum,$name,:legend")
   }
 
@@ -694,7 +694,7 @@ class ExprApiSuite extends MUnitRouteSuite {
 
 object ExprApiSuite {
 
-  case class Output(program: List[String], context: Context)
+  case class ChunkOutput(chunk: Int, tokens: List[String], context: Context)
 
   case class Context(stack: List[String], variables: Map[String, String])
 

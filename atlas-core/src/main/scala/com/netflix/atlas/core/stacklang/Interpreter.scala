@@ -177,7 +177,14 @@ case class Interpreter(vocabulary: List[Word], maxStackSize: Int = 1024) {
           finished = true
           step.copy(context = step.context.unfreeze)
         } else {
-          current = nextStep(step)
+          val next = nextStep(step)
+          if (next.context.callDepth > 10)
+            throw new IllegalStateException("looping detected")
+          if (next.context.stackSize > maxStackSize)
+            throw new IllegalStateException(
+              s"stack overflow: stack size exceeds limit of $maxStackSize"
+            )
+          current = next
           step
         }
       }

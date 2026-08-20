@@ -25,15 +25,16 @@ class InterpreterSuite extends FunSuite {
   val interpreter = new Interpreter(
     List(
       PushFoo,
-      Overloaded("overloaded", "one", true),
-      Overloaded("overloaded", "two", true),
-      Overloaded("overloaded", "three", true),
-      Overloaded("overloaded2", "one", false),
-      Overloaded("overloaded2", "two", true),
-      Overloaded("overloaded2", "three", true),
-      Overloaded("no-match", "one", false),
+      Overloaded(name="overloaded", value="one", matches = true),
+      Overloaded(name="overloaded", value="two", matches = true),
+      Overloaded(name="overloaded", value="three", matches=true),
+      Overloaded(name="overloaded2", value="one", matches=false),
+      Overloaded(name="overloaded2", value="two", matches=true),
+      Overloaded(name="overloaded2", value="three", matches=true),
+      Overloaded(name="no-match", value="one", matches=false),
       Unstable
-    )
+    ),
+    maxStackSize = 5000
   )
 
   def context(vs: List[Any]): Context = {
@@ -148,6 +149,20 @@ class InterpreterSuite extends FunSuite {
     val third = result.next()
     assertEquals(third.program, List.empty[Any])
     assert(!result.hasNext)
+  }
+
+  test("debug iterator throws on stack overflow") {
+    val smallInterpreter = new Interpreter(List.empty, maxStackSize = 3)
+    val program = List("a", "b", "c", "d", "e")
+    val iter = smallInterpreter.debug(program, Context(smallInterpreter, Nil, Map.empty))
+    iter.next() // initial: program=5 tokens, stack empty
+    iter.next() // after "a": stack size 1
+    iter.next() // after "b": stack size 2
+    // next() will call nextStep producing stack size 4 > maxStackSize 3 → throws
+    val e = intercept[IllegalStateException] {
+      iter.next()
+    }
+    assert(e.getMessage.contains("stack overflow"), e.getMessage)
   }
 
   //  (,:depth,:nlist,(,:dup,),:each,),f,:sset,1$(printf ',f,:fcall%.0s' $(seq 443))

@@ -142,22 +142,29 @@ class ExprApi extends WebApi {
   private def processDebugRequest(query: String, vocabName: String): HttpResponse = {
     val interpreter = newInterpreter(vocabName)
     val plan = ChunkPlanner.plan(query, ApiSettings.debugMaxChunksPerQuery)
-    // `debug` now returns an Iterator[Step] to bound per-step memory in the
-    // interpreter. The API still emits the full list in the JSON body, so we
-    // materialize here. Streaming the JSON response is a follow-up; that's
-    // what completes the memory fix end-to-end.
-    val execSteps = interpreter.debug(query).toList
-    if (execSteps.nonEmpty) {
-      verifyStackContents(vocabName, execSteps.last.context.stack)
+    val totalTokens = Interpreter.splitAndTrim(query).size
+    val steps = List.newBuilder[Map[String, Any]]
+    var chunkIdx = 0
+    var finalCtx: Option[Context] = None
+    val iter = interpreter.debug(query)
+    while (iter.hasNext) {
+      val step = iter.next()
+      finalCtx = Some(step.context)
+      val tokensProcessed = totalTokens - step.program.size
+      while (chunkIdx < plan.chunks.size && plan.chunks(chunkIdx).end <= tokensProcessed) {
+        val chunk = plan.chunks(chunkIdx)
+        val stack = step.context.stack.map(valueString)
+        val vars  = step.context.variables.map(t => t._1 -> valueString(t._2))
+        steps += Map(
+          "chunk"   -> chunk.index,
+          "tokens"  -> chunk.tokens,
+          "context" -> Map("stack" -> stack, "variables" -> vars)
+        )
+        chunkIdx += 1
+      }
     }
-
-    val steps = execSteps.map { step =>
-      val stack = step.context.stack.map(valueString)
-      val vars = step.context.variables.map(t => t._1 -> valueString(t._2))
-      val ctxt = Map("stack" -> stack, "variables" -> vars)
-      Map("program" -> step.program, "context" -> ctxt)
-    }
-    jsonResponse(steps, ExprApi.chunkPlanHeaders(plan))
+    finalCtx.foreach(ctx => verifyStackContents(vocabName, ctx.stack))
+    jsonResponse(steps.result(), ExprApi.chunkPlanHeaders(plan))
   }
 
   private def processNormalizeRequest(query: String, vocabName: String): HttpResponse = {
