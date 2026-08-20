@@ -25,13 +25,13 @@ class InterpreterSuite extends FunSuite {
   val interpreter = new Interpreter(
     List(
       PushFoo,
-      Overloaded(name="overloaded", value="one", matches = true),
-      Overloaded(name="overloaded", value="two", matches = true),
-      Overloaded(name="overloaded", value="three", matches=true),
-      Overloaded(name="overloaded2", value="one", matches=false),
-      Overloaded(name="overloaded2", value="two", matches=true),
-      Overloaded(name="overloaded2", value="three", matches=true),
-      Overloaded(name="no-match", value="one", matches=false),
+      Overloaded(name = "overloaded", value = "one", matches = true),
+      Overloaded(name = "overloaded", value = "two", matches = true),
+      Overloaded(name = "overloaded", value = "three", matches = true),
+      Overloaded(name = "overloaded2", value = "one", matches = false),
+      Overloaded(name = "overloaded2", value = "two", matches = true),
+      Overloaded(name = "overloaded2", value = "three", matches = true),
+      Overloaded(name = "no-match", value = "one", matches = false),
       Unstable
     ),
     maxStackSize = 5000

@@ -151,7 +151,7 @@ class ExprApi extends WebApi {
       while (chunkIdx < plan.chunks.size && plan.chunks(chunkIdx).end <= tokensProcessed) {
         val chunk = plan.chunks(chunkIdx)
         val stack = step.context.stack.map(valueString)
-        val vars  = step.context.variables.map(t => t._1 -> valueString(t._2))
+        val vars = step.context.variables.map(t => t._1 -> valueString(t._2))
         steps += Map(
           "chunk"   -> chunk.index,
           "tokens"  -> chunk.tokens,
