@@ -15,12 +15,15 @@
  */
 package com.netflix.atlas.webapi
 
+import org.apache.pekko.http.scaladsl.model.ContentTypes
 import org.apache.pekko.http.scaladsl.model.HttpEntity
 import org.apache.pekko.http.scaladsl.model.HttpResponse
 import org.apache.pekko.http.scaladsl.model.MediaTypes
 import org.apache.pekko.http.scaladsl.model.StatusCodes
 import org.apache.pekko.http.scaladsl.server.Directives.*
 import org.apache.pekko.http.scaladsl.server.Route
+import org.apache.pekko.stream.scaladsl.Source
+import org.apache.pekko.util.ByteString
 import com.netflix.atlas.core.model.Expr
 import com.netflix.atlas.core.model.ExprNormalizer
 import com.netflix.atlas.core.model.FilterExpr
@@ -136,18 +139,40 @@ class ExprApi extends WebApi {
 
   private def processDebugRequest(query: String, vocabName: String): HttpResponse = {
     val interpreter = newInterpreter(vocabName)
-    val execSteps = interpreter.debug(query)
-    if (execSteps.nonEmpty) {
-      verifyStackContents(vocabName, execSteps.last.context.stack)
+    val maxSteps = ApiSettings.debugMaxSteps
+
+    // Run the program once without retaining the steps so that an invalid expression still
+    // gets a normal error response before any of the body is sent. Stops early if the step
+    // limit is exceeded, the stream below will then fail when it reaches the limit.
+    var count = 0
+    var finalStack: List[Any] = Nil
+    val check = interpreter.debugSteps(query)
+    while (check.hasNext && count <= maxSteps) {
+      finalStack = check.next().context.stack
+      count += 1
+    }
+    if (count <= maxSteps) {
+      verifyStackContents(vocabName, finalStack)
     }
 
-    val steps = execSteps.map { step =>
-      val stack = step.context.stack.map(valueString)
-      val vars = step.context.variables.map(t => t._1 -> valueString(t._2))
-      val ctxt = Map("stack" -> stack, "variables" -> vars)
-      Map("program" -> step.program, "context" -> ctxt)
+    // Encode each step as it is produced. The output is the same as encoding all of the
+    // steps as a single json array.
+    val steps = interpreter.debugSteps(query).zipWithIndex.map {
+      case (step, i) =>
+        if (i >= maxSteps) {
+          throw new IllegalStateException(s"debug step limit of $maxSteps exceeded")
+        }
+        val stack = step.context.stack.map(valueString)
+        val vars = step.context.variables.map(t => t._1 -> valueString(t._2))
+        val ctxt = Map("stack" -> stack, "variables" -> vars)
+        val json = Json.encode(Map("program" -> step.program, "context" -> ctxt))
+        ByteString(if (i == 0) json else s",$json")
     }
-    jsonResponse(steps)
+    val data = Source.fromIterator { () =>
+      Iterator.single(ByteString("[")) ++ steps ++ Iterator.single(ByteString("]"))
+    }
+    val entity = HttpEntity.Chunked.fromData(ContentTypes.`application/json`, data)
+    HttpResponse(StatusCodes.OK, entity = entity)
   }
 
   private def processNormalizeRequest(query: String, vocabName: String): HttpResponse = {

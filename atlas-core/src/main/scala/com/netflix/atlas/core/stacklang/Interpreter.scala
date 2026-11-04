@@ -155,18 +155,38 @@ case class Interpreter(vocabulary: List[Word], maxStackSize: Int = 1024) {
     executeProgram(splitAndTrim(program), Context(this, Nil, vars, vars, features = features))
   }
 
-  @scala.annotation.tailrec
-  private def debugImpl(steps: List[Step], s: Step): List[Step] = {
-    val trace = s :: steps
-    if (s.program.isEmpty) trace else debugImpl(trace, nextStep(s))
+  /**
+    * Lazily produce the steps for executing a program. Only the current step is held, so
+    * the memory used does not grow with the number of steps. As with `debug`, the context for
+    * the final step is unfrozen.
+    */
+  final def debugSteps(program: List[Any], context: Context): Iterator[Step] = {
+    new Iterator[Step] {
+      private var current = Step(program, context)
+      private var finished = false
+
+      override def hasNext: Boolean = !finished
+
+      override def next(): Step = {
+        if (finished) throw new NoSuchElementException("debug iterator exhausted")
+        val step = current
+        if (step.program.isEmpty) {
+          finished = true
+          step.copy(context = step.context.unfreeze)
+        } else {
+          current = nextStep(step)
+          step
+        }
+      }
+    }
+  }
+
+  final def debugSteps(program: String): Iterator[Step] = {
+    debugSteps(splitAndTrim(program), Context(this, Nil, Map.empty, features = Features.UNSTABLE))
   }
 
   final def debug(program: List[Any], context: Context): List[Step] = {
-    val result = debugImpl(Nil, Step(program, context)) match {
-      case s :: steps => s.copy(context = s.context.unfreeze) :: steps
-      case Nil        => Nil
-    }
-    result.reverse
+    debugSteps(program, context).toList
   }
 
   final def debug(program: List[Any]): List[Step] = {

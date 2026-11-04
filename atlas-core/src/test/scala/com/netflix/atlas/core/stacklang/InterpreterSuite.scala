@@ -132,6 +132,20 @@ class InterpreterSuite extends FunSuite {
     assertEquals(interpreter.debug(list), expected)
   }
 
+  test("debugSteps matches debug") {
+    val list = List("(", "1", ")", "(", "2", ")", ":overloaded")
+    val context = Context(interpreter, Nil, Map.empty, features = Features.UNSTABLE)
+    assertEquals(interpreter.debugSteps(list, context).toList, interpreter.debug(list, context))
+  }
+
+  test("debugSteps is lazy") {
+    // The error for the unknown word should not be thrown until the iterator reaches it
+    val iter = interpreter.debugSteps("1,:unknown-word")
+    assert(iter.hasNext)
+    iter.next()
+    intercept[IllegalStateException](iter.next())
+  }
+
   test("toString") {
     assertEquals(interpreter.toString, "Interpreter(9 words)")
   }

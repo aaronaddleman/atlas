@@ -83,6 +83,8 @@ class ApiSettings(root: => Config) {
 
   def validationRules: List[Rule] = Rule.load(config.getConfigList("publish.rules"))
 
+  def debugMaxSteps: Int = config.getInt("expr.debug.max-steps")
+
   def excludedWords: Set[String] = {
     import scala.jdk.CollectionConverters.*
     config.getStringList("expr.complete.excluded-words").asScala.toSet
